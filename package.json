@@ -1,0 +1,68 @@
+{
+  "name": "ambient-ai",
+  "version": "0.1.0",
+  "description": "Passive screen intelligence - captures your work, analyzes with AI, exports to Obsidian",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "ambient": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc && cp -r src/web/public dist/web/",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js start",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "postinstall": "node dist/postinstall.js || true"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MichaelrKraft/ambient-ai.git"
+  },
+  "homepage": "https://github.com/MichaelrKraft/ambient-ai#readme",
+  "bugs": {
+    "url": "https://github.com/MichaelrKraft/ambient-ai/issues"
+  },
+  "keywords": [
+    "ambient",
+    "screenpipe",
+    "claude",
+    "ai",
+    "productivity",
+    "obsidian",
+    "ocr",
+    "screen-capture",
+    "activity-tracking"
+  ],
+  "author": "Michael Kraft",
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.63.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^11.0.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "node-fetch": "^3.3.2",
+    "node-notifier": "^10.0.1",
+    "open": "^10.2.0",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/node-notifier": "^8.0.5",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

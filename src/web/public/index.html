@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ambient</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>ambient</h1>
+    <div id="status-bar">
+      <span id="status-dot" class="dot running"></span>
+      <span id="status-text">Running</span>
+      <span id="token-count">0 / 50k tokens today</span>
+      <span id="last-poll">Last poll: —</span>
+    </div>
+  </header>
+
+  <nav>
+    <button class="tab active" data-tab="activity">Activity</button>
+    <button class="tab" data-tab="knowledge">Knowledge</button>
+    <button class="tab" data-tab="errors">Errors</button>
+    <button class="tab" data-tab="goals">Goals</button>
+  </nav>
+
+  <main>
+    <section id="activity" class="tab-content active">
+      <div class="controls">
+        <select id="activity-hours">
+          <option value="8">Last 8 hours</option>
+          <option value="24" selected>Last 24 hours</option>
+          <option value="48">Last 48 hours</option>
+        </select>
+      </div>
+      <div id="activity-list" class="card-list">Loading...</div>
+    </section>
+
+    <section id="knowledge" class="tab-content">
+      <div class="controls">
+        <input type="text" id="knowledge-search" placeholder="Search knowledge..." />
+      </div>
+      <div id="knowledge-list" class="card-list">Loading...</div>
+    </section>
+
+    <section id="errors" class="tab-content">
+      <div id="errors-list" class="card-list">Loading...</div>
+    </section>
+
+    <section id="goals" class="tab-content">
+      <div id="goals-list" class="card-list">Loading...</div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

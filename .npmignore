@@ -1,0 +1,36 @@
+# Source files (dist/ is published)
+src/
+tsconfig.json
+
+# Dev/local files
+.env*
+.git/
+.gitignore
+tasks/
+*.log
+
+# TypeScript source (keep .d.ts)
+*.ts
+!*.d.ts
+
+# Source maps
+*.map
+
+# Test files
+__tests__/
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+
+# Documentation for dev
+CONTRIBUTING.md
+CHANGELOG.md
+
+# Editor configs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
