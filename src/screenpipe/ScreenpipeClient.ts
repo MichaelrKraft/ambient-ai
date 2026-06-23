@@ -19,7 +19,10 @@ const DEFAULT_LIMIT = 100;
 const MAX_TOTAL_RESULTS = 500;
 const MIN_TEXT_LENGTH = 20;
 const SIMILARITY_THRESHOLD = 0.85;
-const FETCH_TIMEOUT_MS = 10_000;
+// Screenpipe's /search can take ~10s+ on a large OCR DB (hundreds of
+// thousands of rows). 10s was too tight and aborted valid queries; 25s gives
+// headroom so slow-but-successful fetches aren't dropped.
+const FETCH_TIMEOUT_MS = 25_000;
 const RAW_SQL_TIMEOUT_MS = 30_000;
 const HEALTH_TIMEOUT_MS = 3_000;
 

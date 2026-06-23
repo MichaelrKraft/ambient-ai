@@ -14,7 +14,10 @@ export const PATHS = {
   config: path.join(AMBIENT_DIR, 'config.json'),
 } as const;
 
+// Use the IPv4 loopback explicitly (not "localhost"): screenpipe binds
+// 127.0.0.1, and resolving "localhost" can prefer IPv6 (::1), which may land
+// on a different server squatting on :3030 and make screenpipe look "down".
 export const SCREENPIPE_BASE_URL =
-  process.env.SCREENPIPE_URL ?? 'http://localhost:3030';
+  process.env.SCREENPIPE_URL ?? 'http://127.0.0.1:3030';
 
 export const DAEMON_PORT = parseInt(process.env.AMBIENT_DAEMON_PORT ?? '3741', 10);
