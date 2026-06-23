@@ -186,6 +186,25 @@ export async function runSetupWizard(): Promise<void> {
       console.log(chalk.dim('  (Optional) Set OBSIDIAN_VAULT_PATH for daily exports'));
     }
 
+    // ── Step 6: Coder1 integration (optional) ────────────────────────────────
+    printHeader('Coder1 integration (optional)...');
+    console.log('  ' + chalk.dim('Sync daily summaries into Coder1\'s Notes panel.'));
+    console.log('  ' + chalk.dim('Get your token at: coder1.ai → Settings → Integrations → Ambient AI'));
+
+    const wantsCoder1 = await confirm(rl, '  Connect to Coder1?', false);
+
+    if (wantsCoder1) {
+      const coder1Token = await prompt(rl, '  Paste your Coder1 API token: ');
+
+      if (coder1Token) {
+        const { saveConfig } = await import('../config/index.js');
+        saveConfig({ coder1Token });
+        console.log(chalk.green('  ✓ Token saved. Notes will sync on next: ambient journal'));
+      } else {
+        console.log(chalk.dim('  Skipped. Add later: export CODER1_TOKEN="your-token"'));
+      }
+    }
+
     // ── Summary ──────────────────────────────────────────────────────────────
     console.log('\n  ' + chalk.dim('─'.repeat(40)));
 
