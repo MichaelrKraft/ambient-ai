@@ -125,4 +125,49 @@ export const MIGRATIONS: Migration[] = [
     description: 'Initial schema',
     sql: INITIAL_SCHEMA,
   },
+  {
+    version: 2,
+    description: 'Add web_captures table for browser deep read deduplication',
+    sql: `
+CREATE TABLE IF NOT EXISTS web_captures (
+  url         TEXT PRIMARY KEY,
+  title       TEXT,
+  captured_at TEXT NOT NULL
+);
+`,
+  },
+  {
+    version: 6,
+    description: 'Add tasks table for auto-captured commitments (Air Jelly Tasks feature)',
+    sql: `
+-- tasks: commitments/to-dos auto-extracted from screen activity by the
+-- ActivityAnalyzer each cycle.
+--
+-- Dedup is enforced by content_hash (UNIQUE), a hash of the normalized
+-- (lowercase, trimmed, whitespace-collapsed) task content. Inserts use
+-- INSERT OR IGNORE so the same on-screen commitment seen across many polling
+-- cycles produces exactly one row — mirroring the web_captures idiom.
+--
+-- due_date is a resolved absolute local date (YYYY-MM-DD) or NULL; the
+-- analyzer resolves relative phrases ("Friday", "EOD") against an injected
+-- anchor date so we never store an ambiguous phrase.
+--
+-- status lifecycle: 'open' (default) → 'done' (closed via MCP/dashboard) or
+-- 'dismissed' (aged out by autoDismissStaleTasks during the daily export).
+CREATE TABLE IF NOT EXISTS tasks (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  content        TEXT NOT NULL,
+  content_hash   TEXT NOT NULL UNIQUE,
+  source_apps    TEXT,
+  due_date       TEXT,
+  status         TEXT NOT NULL DEFAULT 'open',
+  confidence     REAL,
+  created_at     TEXT NOT NULL,
+  completed_at   TEXT,
+  is_pii_flagged INTEGER NOT NULL DEFAULT 0,
+  CHECK (status IN ('open','done','dismissed'))
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status_due ON tasks(status, due_date);
+`,
+  },
 ];

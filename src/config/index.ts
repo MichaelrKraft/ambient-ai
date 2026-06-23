@@ -26,6 +26,10 @@ export interface AmbientConfig {
   obsidianLinking: ObsidianLinkingConfig;
   /** NotebookLM integration configuration */
   notebookLM: NotebookLMConfig;
+  /** Coder1 IDE integration — sync daily notes into Coder1's Notes panel */
+  coder1Token?: string;
+  /** Coder1 base URL. Defaults to https://coder1.ai */
+  coder1BaseUrl?: string;
 }
 
 export interface NotebookLMConfig {
@@ -90,6 +94,8 @@ export function loadConfig(): AmbientConfig {
     anthropicApiKey: apiKey,
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? saved.telegramBotToken,
     telegramChatId: process.env.TELEGRAM_CHAT_ID ?? saved.telegramChatId,
+    coder1Token: process.env.CODER1_TOKEN ?? saved.coder1Token,
+    coder1BaseUrl: process.env.CODER1_BASE_URL ?? saved.coder1BaseUrl,
   };
 
   return _config;

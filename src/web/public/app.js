@@ -355,6 +355,74 @@ function renderGoalCard(goal) {
 }
 
 // ------------------------------------------------------------------
+// Tasks tab
+// ------------------------------------------------------------------
+
+async function loadTasks() {
+  const list = document.getElementById('tasks-list');
+  if (!list) return;
+  const filterEl = document.getElementById('tasks-filter');
+  const filter = filterEl ? filterEl.value : 'open';
+  list.textContent = 'Loading...';
+  try {
+    const res = await fetch(`/api/tasks?filter=${encodeURIComponent(filter)}`);
+    const tasks = await res.json();
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      list.textContent = `No ${filter} tasks.`;
+      return;
+    }
+    list.innerHTML = '';
+    for (const t of tasks) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const due = t.due_date ? ` · due ${t.due_date}` : '';
+      card.innerHTML = `<div class="card-body">${escapeHtml(t.content)}<span class="meta">${escapeHtml(due)}</span></div>` +
+        `<button data-task-id="${t.id}" class="task-done">Done</button>`;
+      list.appendChild(card);
+    }
+    list.querySelectorAll('.task-done').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.taskId;
+        btn.disabled = true;
+        try {
+          const r = await fetch(`/api/tasks/${id}/done`, { method: 'POST' });
+          if (r.ok) btn.closest('.card').style.opacity = '0.5';
+          else btn.disabled = false;
+        } catch {
+          btn.disabled = false;
+        }
+      });
+    });
+  } catch (err) {
+    list.textContent = 'Failed to load tasks.';
+  }
+}
+
+// ------------------------------------------------------------------
+// Ask tab — conversational memory Q&A
+// ------------------------------------------------------------------
+
+async function sendAsk() {
+  const input = document.getElementById('ask-input');
+  const answer = document.getElementById('ask-answer');
+  if (!input || !answer) return;
+  const question = input.value.trim();
+  if (!question) return;
+  answer.textContent = 'Thinking…';
+  try {
+    const res = await fetch('/ask', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const data = await res.json();
+    answer.textContent = res.ok ? data.answer : `Error: ${data.error || res.status}`;
+  } catch (err) {
+    answer.textContent = 'Request failed.';
+  }
+}
+
+// ------------------------------------------------------------------
 // Router — decide which loader to call per tab
 // ------------------------------------------------------------------
 
@@ -365,6 +433,9 @@ function loadTabData(tab) {
       break;
     case 'knowledge':
       loadKnowledge();
+      break;
+    case 'tasks':
+      loadTasks();
       break;
     case 'errors':
       loadErrors();
@@ -394,6 +465,24 @@ if (knowledgeSearch) {
   knowledgeSearch.addEventListener('input', () => {
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(loadKnowledge, 300);
+  });
+}
+
+// Tasks filter selector
+const tasksFilter = document.getElementById('tasks-filter');
+if (tasksFilter) {
+  tasksFilter.addEventListener('change', loadTasks);
+}
+
+// Ask: button click + Enter key
+const askSend = document.getElementById('ask-send');
+if (askSend) {
+  askSend.addEventListener('click', sendAsk);
+}
+const askInput = document.getElementById('ask-input');
+if (askInput) {
+  askInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendAsk();
   });
 }
 

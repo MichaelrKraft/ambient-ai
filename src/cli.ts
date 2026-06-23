@@ -233,6 +233,22 @@ program
       if (result.linksCreated && result.linksCreated > 0) {
         console.log(`  Atomic links: ${result.linksCreated}`);
       }
+
+      // Sync to Coder1 if configured (best-effort, non-blocking)
+      try {
+        const { loadConfig } = await import('./config/index.js');
+        const config = loadConfig();
+        if (config.coder1Token && result.filePath) {
+          const { syncToCoder1 } = await import('./coder1/sync.js');
+          const today = new Date();
+          const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+          const noteContent = fs.readFileSync(result.filePath, 'utf8');
+          await syncToCoder1(dateStr, noteContent, config);
+        }
+      } catch (syncErr) {
+        // Never let Coder1 sync failure affect the journal exit code
+        console.warn('[Ambient → Coder1] Sync skipped due to config error:', syncErr instanceof Error ? syncErr.message : syncErr);
+      }
     } else {
       console.log(`\nExport failed: ${result.error}`);
       process.exit(1);
@@ -372,6 +388,105 @@ notebook
       console.log('\nNo notebooks created yet.');
     }
 
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// pause / resume — temporarily disable all daemon work
+// ---------------------------------------------------------------------------
+
+program
+  .command('pause [duration]')
+  .description('Pause the daemon: 1h | today | forever (default 1h)')
+  .action(async (duration: string | undefined) => {
+    const { setPause, parsePauseDuration } = await import('./state/pause.js');
+    const { getDb } = await import('./storage/db.js');
+    const arg = duration ?? '1h';
+    let until;
+    try {
+      until = parsePauseDuration(arg);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+    setPause(getDb(), until);
+    if (until === 'forever') {
+      console.log('Daemon paused indefinitely. Resume with: ambient resume');
+    } else {
+      console.log(`Daemon paused until ${new Date(until).toLocaleString()}.`);
+    }
+    process.exit(0);
+  });
+
+program
+  .command('resume')
+  .description('Resume the daemon if paused')
+  .action(async () => {
+    const { setPause } = await import('./state/pause.js');
+    const { getDb } = await import('./storage/db.js');
+    setPause(getDb(), null);
+    console.log('Daemon resumed. Next polling cycle will run normally.');
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// diagnostics — recent state + last errors
+// ---------------------------------------------------------------------------
+
+program
+  .command('diagnostics')
+  .description('Dump daemon state and recent errors')
+  .action(async () => {
+    const { getDb } = await import('./storage/db.js');
+    const { getPauseInfo } = await import('./state/pause.js');
+    const db = getDb();
+
+    // Daemon state values.
+    const stateRows = db
+      .prepare("SELECT key, value, updated_at FROM daemon_state ORDER BY key")
+      .all() as Array<{ key: string; value: string; updated_at: string }>;
+    console.log('Daemon state:');
+    for (const r of stateRows) {
+      console.log(`  ${r.key.padEnd(30)} = ${r.value}  (${r.updated_at})`);
+    }
+
+    const pause = getPauseInfo(db);
+    console.log(
+      `Pause: ${pause === null ? 'inactive' : pause.until === 'forever' ? 'forever' : new Date(pause.until).toISOString()}`,
+    );
+
+    // Recent error_events.
+    const errors = db
+      .prepare(
+        `SELECT error_text, app_name, occurrence_count, last_seen
+           FROM error_events
+          ORDER BY last_seen DESC
+          LIMIT 10`,
+      )
+      .all() as Array<{
+        error_text: string;
+        app_name: string | null;
+        occurrence_count: number;
+        last_seen: string;
+      }>;
+    console.log(`\nRecent error events (${errors.length}):`);
+    for (const e of errors) {
+      console.log(`  [${e.app_name ?? '-'}] ×${e.occurrence_count}  ${e.error_text.slice(0, 100)}  (${e.last_seen})`);
+    }
+
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// update — placeholder for Sparkle auto-update
+// ---------------------------------------------------------------------------
+
+program
+  .command('update')
+  .description('Update the daemon to the latest version')
+  .action(() => {
+    console.log('Auto-update via Sparkle is not yet implemented.');
+    console.log('Run: npm install -g coder1-ambient@latest');
     process.exit(0);
   });
 

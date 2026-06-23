@@ -111,4 +111,35 @@ export const AMBIENT_TOOLS: Tool[] = [
       properties: {},
     },
   },
+  {
+    name: 'get_tasks',
+    description:
+      'Get tasks auto-captured from the user’s screen activity (commitments and to-dos), optionally filtered by status',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        filter: {
+          type: 'string',
+          description:
+            "Which tasks to return: 'open' (all open, default), 'overdue' (past due date), or 'upcoming' (due within 48h)",
+          enum: ['open', 'overdue', 'upcoming'],
+          default: 'open',
+        },
+      },
+    },
+  },
+  {
+    name: 'complete_task',
+    description: 'Mark an auto-captured task as done by its id',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: {
+          type: 'number',
+          description: 'The id of the task to complete',
+        },
+      },
+      required: ['task_id'],
+    },
+  },
 ];

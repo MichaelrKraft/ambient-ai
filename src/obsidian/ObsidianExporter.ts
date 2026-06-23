@@ -12,7 +12,27 @@ import { getDb } from '../storage/db.js';
 import { createLogger } from '../shared/logger.js';
 import { loadConfig } from '../config/index.js';
 import { AtomicLinker } from './AtomicLinker.js';
-import type { ActivitySession, KnowledgeItem } from '../storage/AmbientStore.js';
+import {
+  getTasksForDateRange,
+  getOpenTasks,
+  getOverdueTasks,
+  getUpcomingTasks,
+  getUnresolvedErrors,
+  autoDismissStaleTasks,
+  type ActivitySession,
+  type KnowledgeItem,
+  type Task,
+  type ErrorEvent,
+} from '../storage/AmbientStore.js';
+
+/** The task/meeting data threaded into the daily note's "Tasks & Follow-ups". */
+interface DailyTaskData {
+  completedToday: Task[];
+  openTasks: Task[];
+  overdue: Task[];
+  upcoming: Task[];
+  unresolvedErrors: ErrorEvent[];
+}
 
 const log = createLogger('obsidian');
 
@@ -257,10 +277,66 @@ function formatKnowledgeInsights(
   return lines.join('\n');
 }
 
+/**
+ * Renders the "Tasks & Follow-ups" block — Air Jelly's structured brief:
+ * Completed today / Open threads (open + overdue + unresolved errors) /
+ * Tomorrow's priorities (tasks due within 48h). Returns an empty string when
+ * there is nothing in any bucket, so the section is omitted entirely.
+ */
+function formatTasksSection(data: DailyTaskData): string {
+  const { completedToday, openTasks, overdue, upcoming, unresolvedErrors } = data;
+  if (
+    completedToday.length === 0 &&
+    openTasks.length === 0 &&
+    unresolvedErrors.length === 0
+  ) {
+    return '';
+  }
+
+  const overdueIds = new Set(overdue.map((t) => t.id));
+  const lines: string[] = ['## Tasks & Follow-ups', ''];
+
+  // Completed today
+  lines.push('### Completed');
+  if (completedToday.length === 0) {
+    lines.push('_Nothing marked done today._');
+  } else {
+    for (const t of completedToday) lines.push(`- [x] ${t.content}`);
+  }
+  lines.push('');
+
+  // Open threads: open tasks (overdue flagged) + unresolved errors
+  lines.push('### Open threads');
+  if (openTasks.length === 0 && unresolvedErrors.length === 0) {
+    lines.push('_No open tasks or unresolved errors._');
+  } else {
+    for (const t of openTasks) {
+      const flag = overdueIds.has(t.id) ? '⚠️ overdue' : t.due_date ? `due ${t.due_date}` : 'no date';
+      lines.push(`- [ ] ${t.content} _(${flag})_`);
+    }
+    for (const e of unresolvedErrors.slice(0, 3)) {
+      const app = e.app_name ?? 'unknown';
+      lines.push(`- 🔴 Unresolved error in ${app}: ${e.error_text.slice(0, 80)}`);
+    }
+  }
+  lines.push('');
+
+  // Tomorrow's priorities: tasks due within the next 48h
+  lines.push("### Tomorrow's priorities");
+  if (upcoming.length === 0) {
+    lines.push('_Nothing due in the next 48 hours._');
+  } else {
+    for (const t of upcoming) lines.push(`- ${t.content} _(due ${t.due_date})_`);
+  }
+
+  return lines.join('\n');
+}
+
 function generateDailyNote(
   date: Date,
   activities: ActivitySession[],
   knowledge: KnowledgeItem[],
+  taskData: DailyTaskData,
   linker: AtomicLinker | null = null,
 ): string {
   const dateStr = formatDate(date, 'YYYY-MM-DD');
@@ -290,6 +366,10 @@ function generateDailyNote(
     }
   }
 
+  const openTaskCount = taskData.openTasks.length;
+  const tasksSection = formatTasksSection(taskData);
+  const tasksBlock = tasksSection ? `${tasksSection}\n\n---\n\n` : '';
+
   const note = `# ${dateStr} — ${dayName}
 
 ## Summary
@@ -299,11 +379,12 @@ function generateDailyNote(
 | Activities | ${totalActivities} |
 | Apps Used | ${uniqueApps.size} |
 | Insights | ${totalInsights} |
+| Open Tasks | ${openTaskCount} |
 | Total Time | ${totalTimeStr} |
 
 ---
 
-## Activity Timeline
+${tasksBlock}## Activity Timeline
 
 ${formatActivityTimeline(activities, linker)}
 
@@ -383,10 +464,24 @@ export function exportTodayToObsidian(options: ExportOptions = {}): ExportResult
     const activities = getActivityForDateRange(start, end);
     const knowledge = getKnowledgeForDateRange(start, end);
 
-    log.info(`Found ${activities.length} activities and ${knowledge.length} knowledge items`);
+    // Age out stale open tasks before reporting so overdue lists stay bounded.
+    autoDismissStaleTasks(14);
+
+    const tasksToday = getTasksForDateRange(start, end);
+    const taskData: DailyTaskData = {
+      completedToday: tasksToday.filter((t) => t.status === 'done'),
+      openTasks: getOpenTasks(),
+      overdue: getOverdueTasks(),
+      upcoming: getUpcomingTasks(48),
+      unresolvedErrors: getUnresolvedErrors(0),
+    };
+
+    log.info(
+      `Found ${activities.length} activities, ${knowledge.length} knowledge items, ${taskData.openTasks.length} open tasks`,
+    );
 
     // Generate the note with atomic linking
-    const noteContent = generateDailyNote(today, activities, knowledge, linker);
+    const noteContent = generateDailyNote(today, activities, knowledge, taskData, linker);
 
     // Write to file
     const fileName = `${formatDate(today, obsidianConfig.dateFormat)}.md`;

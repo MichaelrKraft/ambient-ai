@@ -43,6 +43,10 @@ export function getDb(): Database.Database {
   // NORMAL is safe with WAL; FULL is the default and much slower.
   _db.pragma('synchronous = NORMAL');
 
+  // busy_timeout: required when multiple connections write to the same DB
+  // (e.g. analyzer writes while a reader queries). 5s ample.
+  _db.pragma('busy_timeout = 5000');
+
   runMigrations(_db);
 
   return _db;

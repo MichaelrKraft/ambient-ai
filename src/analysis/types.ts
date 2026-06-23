@@ -28,7 +28,18 @@ export interface AnalysisResult {
     evidence: string;
     confidence: number;
   }>;
+  /** Auto-captured commitments/to-dos. due_date is a resolved absolute local
+   *  date (YYYY-MM-DD) or null. */
+  tasks: Array<{
+    content: string;
+    dueDate: string | null;
+    confidence: number;
+  }>;
   tokenCost: number;
+  /** Optional: input/output token split for cost telemetry.
+   *  The fallback path doesn't know these, so they're optional. */
+  tokensIn?: number;
+  tokensOut?: number;
 }
 
 export interface AnalysisBatch {

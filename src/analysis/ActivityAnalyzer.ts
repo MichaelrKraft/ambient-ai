@@ -19,8 +19,14 @@ import type { OcrEntry } from '../screenpipe/types.js';
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const MODEL = 'claude-haiku-4-5-20251001';
-const MAX_TOKENS = 1024;
+// Raised from 1024 → 1280 to make room for the tasks array (capped at 2 items)
+// without risking truncated JSON, which would fail JSON.parse and drop the
+// entire cycle's activity/knowledge/errors to the fallback path.
+const MAX_TOKENS = 1280;
 const DAILY_TOKEN_BUDGET = 50_000;
+
+/** Max tasks extracted per cycle — keeps output well under MAX_TOKENS. */
+const MAX_TASKS_PER_CYCLE = 2;
 
 /**
  * Maximum characters kept per app's text block in the prompt.
@@ -45,6 +51,7 @@ function buildFallback(entries: OcrEntry[]): AnalysisResult {
     knowledge: [],
     errors: [],
     goalProgress: [],
+    tasks: [],
     tokenCost: 0,
   };
 }
@@ -74,11 +81,18 @@ interface ClaudeGoalProgressItem {
   confidence: number;
 }
 
+interface ClaudeTaskItem {
+  content: string;
+  dueDate: string | null;
+  confidence: number;
+}
+
 interface ClaudeResponse {
   activity: ClaudeActivityPayload;
   knowledge: ClaudeKnowledgeItem[];
   errors: ClaudeErrorItem[];
   goalProgress: ClaudeGoalProgressItem[];
+  tasks: ClaudeTaskItem[];
 }
 
 // ── Type guards ────────────────────────────────────────────────────────────
@@ -145,8 +159,15 @@ function buildPrompt(batch: AnalysisBatch): string {
           .join('\n')
       : 'None set';
 
+  // Anchor date for resolving relative due-dates ("Friday", "EOD") to an
+  // absolute local YYYY-MM-DD. Claude has no reliable "today" otherwise.
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'long' });
+
   return `You are analyzing a developer's screen activity. Extract structured insights.
 
+TODAY IS: ${dayOfWeek}, ${today} (local time)
 ACTIVITY PERIOD: ${periodStart} to ${periodEnd}
 
 SCREEN CONTENT (OCR text, grouped by app):
@@ -171,6 +192,9 @@ Respond with ONLY valid JSON matching this schema:
   ],
   "goalProgress": [
     {"goalId": "goal id from the list above", "evidence": "specific activity that suggests progress", "confidence": 0.7}
+  ],
+  "tasks": [
+    {"content": "a concrete commitment or to-do the user expressed or was asked to do", "dueDate": "YYYY-MM-DD or null", "confidence": 0.8}
   ]
 }
 
@@ -178,7 +202,14 @@ GUIDELINES:
 - knowledge: only include genuinely useful items (decisions made, bugs fixed, patterns discovered). Max 3 items.
 - errors: only include actual errors (TypeErrors, build failures, 404s, etc.), not warnings or lint suggestions. Max 3 items.
 - goalProgress: only include if there is clear evidence. confidence=0.0 if unsure, skip the item entirely.
+- tasks: only include clear commitments/action items ("I'll send the deck Friday", "follow up with Sarah", a Slack ask directed at the user). Max ${MAX_TASKS_PER_CYCLE}. Skip vague intentions. Resolve any relative deadline ("Friday", "tomorrow", "EOD", "next week") to an absolute local date in dueDate using TODAY above; use null if no deadline is stated. Phrase content as a short imperative ("Send the deck to the client").
 - summary: be specific. "Debugging a React useState hook issue in the checkout flow" is better than "coding".`;
+}
+
+/** Validates a resolved due-date string is YYYY-MM-DD, else returns null. */
+function normaliseDueDate(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(value.trim()) ? value.trim() : null;
 }
 
 // ── Main class ─────────────────────────────────────────────────────────────
@@ -309,7 +340,20 @@ export class ActivityAnalyzer {
           evidence: filterPII(gp.evidence ?? ''),
           confidence: Math.min(1, Math.max(0, gp.confidence)),
         })),
+      tasks: (Array.isArray(parsed.tasks) ? parsed.tasks : [])
+        .slice(0, MAX_TASKS_PER_CYCLE)
+        .map((t) => ({
+          content: filterPII(t.content ?? ''),
+          dueDate: normaliseDueDate(t.dueDate),
+          confidence:
+            typeof t.confidence === 'number'
+              ? Math.min(1, Math.max(0, t.confidence))
+              : 0.5,
+        }))
+        .filter((t) => t.content.length > 0),
       tokenCost,
+      tokensIn: inputTokens,
+      tokensOut: outputTokens,
     };
 
     this.log.info('Analysis complete', {
@@ -352,6 +396,18 @@ export class ActivityAnalyzer {
         timestamp: nowISO(),
         evidence: gp.evidence,
         confidence: gp.confidence,
+      });
+    }
+
+    for (const task of result.tasks) {
+      // insertTask dedups on content_hash (INSERT OR IGNORE), so the same
+      // commitment seen on later cycles is silently skipped.
+      store.insertTask({
+        content: task.content,
+        source_apps: result.activity.appsPresent,
+        due_date: task.dueDate ?? undefined,
+        confidence: task.confidence,
+        is_pii_flagged: isPIISuspicious(task.content),
       });
     }
 
