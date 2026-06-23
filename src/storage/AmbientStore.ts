@@ -9,6 +9,7 @@
  * calendar day automatically starts at zero without any explicit reset.
  */
 
+import crypto from 'crypto';
 import { getDb } from './db.js';
 import { createLogger } from '../shared/logger.js';
 import { nowISO, hoursAgoISO, minutesAgoISO } from '../shared/time.js';
@@ -117,6 +118,31 @@ export interface NewNotification {
   channel?: string;
 }
 
+export type TaskStatus = 'open' | 'done' | 'dismissed';
+
+export interface Task {
+  id: number;
+  content: string;
+  content_hash: string;
+  /** Deserialised from the TEXT JSON column. */
+  source_apps: string[] | null;
+  /** Resolved absolute local date YYYY-MM-DD, or null. */
+  due_date: string | null;
+  status: TaskStatus;
+  confidence: number | null;
+  created_at: string;
+  completed_at: string | null;
+  is_pii_flagged: boolean;
+}
+
+export interface NewTask {
+  content: string;
+  source_apps?: string[];
+  due_date?: string;
+  confidence?: number;
+  is_pii_flagged?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Raw row shapes returned by better-sqlite3 (before deserialisation)
 // ---------------------------------------------------------------------------
@@ -169,6 +195,19 @@ interface RawNotification {
   feedback: string | null;
 }
 
+interface RawTask {
+  id: number;
+  content: string;
+  content_hash: string;
+  source_apps: string | null;
+  due_date: string | null;
+  status: string;
+  confidence: number | null;
+  created_at: string;
+  completed_at: string | null;
+  is_pii_flagged: number;
+}
+
 interface RawDaemonState {
   value: string | null;
 }
@@ -217,6 +256,37 @@ function deserialiseErrorEvent(row: RawErrorEvent): ErrorEvent {
 function deserialiseGoal(row: RawGoal): Goal {
   const status = row.status as Goal['status'];
   return { ...row, status };
+}
+
+function deserialiseTask(row: RawTask): Task {
+  return {
+    ...row,
+    source_apps: parseJsonArray(row.source_apps),
+    status: row.status as TaskStatus,
+    is_pii_flagged: row.is_pii_flagged !== 0,
+  };
+}
+
+/**
+ * Normalises task content for dedup: lowercase, trim, collapse internal
+ * whitespace. The SHA-256 of this string is stored as content_hash (UNIQUE),
+ * so the same on-screen commitment seen across many cycles dedups to one row.
+ */
+function taskContentHash(content: string): string {
+  const normalised = content.toLowerCase().trim().replace(/\s+/g, ' ');
+  return crypto.createHash('sha256').update(normalised).digest('hex');
+}
+
+/**
+ * Returns a YYYY-MM-DD string in LOCAL time for the given date (default: now).
+ * Task due_dates and "overdue" comparisons are all local-date based, matching
+ * dailyTokenKey() and the Obsidian exporter's local date ranges.
+ */
+export function localDateString(date: Date = new Date()): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +538,33 @@ export function getActiveGoals(): Goal[] {
   return rows.map(deserialiseGoal);
 }
 
+/**
+ * Returns active goals whose target_date is within `withinDays` days AND that
+ * have recorded no goal_progress in the last `staleDays` days — i.e. goals
+ * worth nudging the user about. Soonest deadline first.
+ */
+export function getGoalsNeedingNudge(
+  withinDays: number = 7,
+  staleDays: number = 3,
+): Goal[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT g.* FROM goals g
+       WHERE g.status = 'active'
+         AND g.target_date IS NOT NULL
+         AND date(g.target_date) <= date('now', '+' || ? || ' days')
+         AND NOT EXISTS (
+           SELECT 1 FROM goal_progress gp
+           WHERE gp.goal_id = g.id
+             AND gp.timestamp > datetime('now', '-' || ? || ' days')
+         )
+       ORDER BY date(g.target_date) ASC`,
+    )
+    .all(withinDays, staleDays) as RawGoal[];
+  return rows.map(deserialiseGoal);
+}
+
 // ---------------------------------------------------------------------------
 // Goal progress
 // ---------------------------------------------------------------------------
@@ -522,6 +619,140 @@ export function getRecentNotifications(hoursBack: number): Notification[] {
     .all(since) as RawNotification[];
 
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+
+/**
+ * Inserts an auto-captured task, deduping on content_hash via INSERT OR IGNORE.
+ *
+ * Returns the new row id, or null when the task already existed (the same
+ * commitment seen on a previous cycle) and the insert was ignored.
+ */
+export function insertTask(task: NewTask): number | null {
+  const db = getDb();
+  const hash = taskContentHash(task.content);
+
+  const result = db
+    .prepare(
+      `INSERT OR IGNORE INTO tasks
+         (content, content_hash, source_apps, due_date, status, confidence, created_at, is_pii_flagged)
+       VALUES (?, ?, ?, ?, 'open', ?, ?, ?)`,
+    )
+    .run(
+      task.content,
+      hash,
+      task.source_apps !== undefined ? JSON.stringify(task.source_apps) : null,
+      task.due_date ?? null,
+      task.confidence ?? null,
+      nowISO(),
+      task.is_pii_flagged === true ? 1 : 0,
+    );
+
+  if (result.changes === 0) {
+    log.debug('Task already exists (dedup) — insert ignored');
+    return null;
+  }
+
+  const id = Number(result.lastInsertRowid);
+  log.debug(`Inserted task id=${id}`);
+  return id;
+}
+
+/** Returns all open tasks, oldest first. */
+export function getOpenTasks(limit: number = 100): Task[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT * FROM tasks WHERE status = 'open' ORDER BY created_at ASC LIMIT ?`,
+    )
+    .all(limit) as RawTask[];
+  return rows.map(deserialiseTask);
+}
+
+/**
+ * Returns open tasks whose due_date is strictly before today (local date),
+ * oldest due first. Tasks with a NULL due_date are never overdue.
+ */
+export function getOverdueTasks(): Task[] {
+  const db = getDb();
+  const today = localDateString();
+  const rows = db
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE status = 'open' AND due_date IS NOT NULL AND due_date < ?
+       ORDER BY due_date ASC`,
+    )
+    .all(today) as RawTask[];
+  return rows.map(deserialiseTask);
+}
+
+/**
+ * Returns open tasks due within the next `withinHours` hours (by local date),
+ * including any already due today. Used for "tomorrow's priorities".
+ */
+export function getUpcomingTasks(withinHours: number = 48): Task[] {
+  const db = getDb();
+  const today = localDateString();
+  const until = localDateString(new Date(Date.now() + withinHours * 3_600_000));
+  const rows = db
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE status = 'open' AND due_date IS NOT NULL
+         AND due_date >= ? AND due_date <= ?
+       ORDER BY due_date ASC`,
+    )
+    .all(today, until) as RawTask[];
+  return rows.map(deserialiseTask);
+}
+
+/**
+ * Returns tasks created OR completed within [startISO, endISO).
+ * Used by the daily export to show today's captured + completed tasks.
+ */
+export function getTasksForDateRange(startISO: string, endISO: string): Task[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE (created_at >= ? AND created_at < ?)
+          OR (completed_at >= ? AND completed_at < ?)
+       ORDER BY created_at ASC`,
+    )
+    .all(startISO, endISO, startISO, endISO) as RawTask[];
+  return rows.map(deserialiseTask);
+}
+
+/** Marks a task done (sets status + completed_at). Returns true if a row changed. */
+export function markTaskDone(id: number): boolean {
+  const db = getDb();
+  const result = db
+    .prepare(`UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ? AND status = 'open'`)
+    .run(nowISO(), id);
+  log.debug(`markTaskDone id=${id} changed=${result.changes}`);
+  return result.changes > 0;
+}
+
+/**
+ * Dismisses open tasks created more than `olderThanDays` days ago so stale
+ * commitments don't accumulate and flood overdue alerts forever.
+ * Returns the number of tasks dismissed.
+ */
+export function autoDismissStaleTasks(olderThanDays: number = 14): number {
+  const db = getDb();
+  const cutoff = hoursAgoISO(olderThanDays * 24);
+  const result = db
+    .prepare(
+      `UPDATE tasks SET status = 'dismissed'
+       WHERE status = 'open' AND created_at < ?`,
+    )
+    .run(cutoff);
+  if (result.changes > 0) {
+    log.info(`Auto-dismissed ${result.changes} stale task(s)`);
+  }
+  return result.changes;
 }
 
 // ---------------------------------------------------------------------------

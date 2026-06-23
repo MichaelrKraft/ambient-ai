@@ -28,11 +28,16 @@ import {
   getUnresolvedErrors,
   getActiveGoals,
   insertGoal,
+  getOpenTasks,
+  getOverdueTasks,
+  getUpcomingTasks,
+  markTaskDone,
   type ActivitySession,
   type KnowledgeItem,
   type ErrorEvent,
   type Goal,
   type GoalProgress,
+  type Task,
 } from '../storage/AmbientStore.js';
 import { createLogger } from '../shared/logger.js';
 import { nowISO, durationHuman } from '../shared/time.js';
@@ -428,6 +433,51 @@ function handleGetStuckSummary(): string {
   return lines.join('\n');
 }
 
+function handleGetTasks(args: Record<string, unknown>): string {
+  const filter =
+    args.filter === 'overdue' || args.filter === 'upcoming'
+      ? args.filter
+      : 'open';
+
+  let tasks: Task[];
+  let heading: string;
+  switch (filter) {
+    case 'overdue':
+      tasks = getOverdueTasks();
+      heading = 'Overdue Tasks';
+      break;
+    case 'upcoming':
+      tasks = getUpcomingTasks(48);
+      heading = 'Upcoming Tasks (next 48h)';
+      break;
+    default:
+      tasks = getOpenTasks();
+      heading = 'Open Tasks';
+  }
+
+  if (tasks.length === 0) {
+    return `No ${filter} tasks.`;
+  }
+
+  const lines: string[] = [`## ${heading}\n`];
+  for (const t of tasks) {
+    const due = t.due_date ? ` — due ${t.due_date}` : '';
+    lines.push(`- [${t.id}] ${t.content}${due}`);
+  }
+  return lines.join('\n');
+}
+
+function handleCompleteTask(args: Record<string, unknown>): string {
+  const taskId = typeof args.task_id === 'number' ? args.task_id : null;
+  if (taskId === null) {
+    return 'Error: task_id parameter is required.';
+  }
+  const ok = markTaskDone(taskId);
+  return ok
+    ? `Task ${taskId} marked done.`
+    : `No open task found with id ${taskId}.`;
+}
+
 // ---------------------------------------------------------------------------
 // Server setup
 // ---------------------------------------------------------------------------
@@ -469,6 +519,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case 'get_stuck_summary':
         text = handleGetStuckSummary();
+        break;
+      case 'get_tasks':
+        text = handleGetTasks(safeArgs);
+        break;
+      case 'complete_task':
+        text = handleCompleteTask(safeArgs);
         break;
       default:
         text = `Unknown tool: ${name}`;

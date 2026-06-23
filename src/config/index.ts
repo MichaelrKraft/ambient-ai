@@ -26,6 +26,12 @@ export interface AmbientConfig {
   obsidianLinking: ObsidianLinkingConfig;
   /** NotebookLM integration configuration */
   notebookLM: NotebookLMConfig;
+  /** Coder1 IDE integration — sync daily notes into Coder1's Notes panel */
+  coder1Token?: string;
+  /** Coder1 base URL. Defaults to https://coder1.ai */
+  coder1BaseUrl?: string;
+  /** LeadSpot.AI cloud integration. Default disabled. */
+  leadspot: LeadSpotConfig;
 }
 
 export interface NotebookLMConfig {
@@ -33,6 +39,24 @@ export interface NotebookLMConfig {
   autoSync: boolean;
   notebookPrefix: string;
   defaultDeliverable: 'none' | 'summary' | 'podcast';
+}
+
+/**
+ * LeadSpot.AI integration config.
+ *
+ * Default-disabled: existing Obsidian-only Ambient users must not be affected
+ * by the new code path. `ambient auth login` flips `enabled` to true and
+ * populates daemon_id / organization_id from the OAuth response.
+ *
+ * The refresh token never lives here — it's stored in macOS Keychain under
+ * service "ai.leadspot.ambient", account = daemon_id.
+ */
+export interface LeadSpotConfig {
+  enabled: boolean;
+  base_url: string;
+  refresh_token_keychain_account: string;
+  daemon_id: string;
+  organization_id: string;
 }
 
 const DEFAULTS: Omit<AmbientConfig, 'anthropicApiKey'> = {
@@ -61,6 +85,13 @@ const DEFAULTS: Omit<AmbientConfig, 'anthropicApiKey'> = {
     notebookPrefix: 'ambient',
     defaultDeliverable: 'none',
   },
+  leadspot: {
+    enabled: false,
+    base_url: process.env.LEADSPOT_BASE_URL ?? 'https://app.leadspot.ai',
+    refresh_token_keychain_account: '',
+    daemon_id: '',
+    organization_id: '',
+  },
 };
 
 let _config: AmbientConfig | null = null;
@@ -84,12 +115,25 @@ export function loadConfig(): AmbientConfig {
     }
   }
 
+  // Merge leadspot section: env LEADSPOT_BASE_URL overrides everything.
+  const mergedLeadspot: LeadSpotConfig = {
+    ...DEFAULTS.leadspot,
+    ...(saved.leadspot ?? {}),
+    base_url:
+      process.env.LEADSPOT_BASE_URL
+      ?? saved.leadspot?.base_url
+      ?? DEFAULTS.leadspot.base_url,
+  };
+
   _config = {
     ...DEFAULTS,
     ...saved,
     anthropicApiKey: apiKey,
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? saved.telegramBotToken,
     telegramChatId: process.env.TELEGRAM_CHAT_ID ?? saved.telegramChatId,
+    coder1Token: process.env.CODER1_TOKEN ?? saved.coder1Token,
+    coder1BaseUrl: process.env.CODER1_BASE_URL ?? saved.coder1BaseUrl,
+    leadspot: mergedLeadspot,
   };
 
   return _config;

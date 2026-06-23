@@ -18,6 +18,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import http from 'http';
 import { PATHS, DAEMON_PORT } from '../config/paths.js';
 import { loadConfig } from '../config/index.js';
@@ -30,11 +31,23 @@ import {
   setDaemonState,
 } from '../storage/AmbientStore.js';
 import { ScreenpipeClient } from '../screenpipe/ScreenpipeClient.js';
+import type { OcrEntry } from '../screenpipe/types.js';
 import { ActivityAnalyzer } from '../analysis/ActivityAnalyzer.js';
 import { ProactiveEngine } from '../notifications/ProactiveEngine.js';
 import { createWebServer } from '../web/server.js';
 import { Scheduler } from './Scheduler.js';
 import { exportTodayToObsidian } from '../obsidian/ObsidianExporter.js';
+import { LeadSpotIntegration } from './leadspot-integration.js';
+import { isPaused } from '../state/pause.js';
+import {
+  isBrowserApp,
+  cleanWindowTitle,
+  shouldSkipTitle,
+  extractUrl,
+  groupBrowserEntries,
+  DWELL_STATE_PREFIX,
+  DEEP_READ_MIN_SECONDS,
+} from '../browser/DeepReadTracker.js';
 
 export class Daemon {
   private scheduler: Scheduler | null = null;
@@ -43,6 +56,7 @@ export class Daemon {
   private screenpipeClient: ScreenpipeClient | null = null;
   private analyzer: ActivityAnalyzer | null = null;
   private proactive: ProactiveEngine | null = null;
+  private leadspot: LeadSpotIntegration | null = null;
   private readonly log = createLogger('daemon');
   private lastActivityTime: Date = new Date();  // For auto-idle shutdown
   private lastJournalDate: string | null = null;  // Track last journal export date
@@ -71,7 +85,7 @@ export class Daemon {
 
     // 5. Initialise the Claude analyzer and proactive notification engine.
     this.analyzer = new ActivityAnalyzer(config.anthropicApiKey);
-    this.proactive = new ProactiveEngine(config);
+    this.proactive = new ProactiveEngine();
 
     // 6. Start the web dashboard.
     // createWebServer accepts a Record<string, unknown> for forward-compat;
@@ -79,12 +93,34 @@ export class Daemon {
     this.webServer = createWebServer({});
 
     // 7. Start the polling scheduler.
-    this.scheduler = new Scheduler(config.pollingIntervalMinutes);
+    // When LeadSpot is enabled the cadence drops from 7 min → 3 min steady-state
+    // so signal latency stays under §6's 6-minute target. Obsidian-only users
+    // keep the original cadence from config.
+    const pollingMinutes = config.leadspot.enabled
+      ? Math.min(config.pollingIntervalMinutes, 3)
+      : config.pollingIntervalMinutes;
+    this.scheduler = new Scheduler(pollingMinutes);
     this.scheduler.onTick(() => this.runAnalysisCycle());
     this.scheduler.start();
 
     // 7b. Start journal auto-export scheduler (checks every minute, runs at 6 PM).
     this.startJournalScheduler();
+
+    // 7c. LeadSpot integration — opt-in via config.leadspot.enabled.
+    // This block is the entire integration surface; if leadspot is disabled
+    // (the default for Obsidian-only users) NONE of this code path runs.
+    if (config.leadspot.enabled) {
+      try {
+        this.leadspot = new LeadSpotIntegration({ config });
+        this.leadspot.start();
+      } catch (err) {
+        // Most likely cause: enabled=true but no daemon_id (user enabled config
+        // manually without running `ambient auth login`). Log and continue;
+        // Obsidian path is unaffected.
+        this.log.error('Failed to initialize LeadSpot integration — running Obsidian-only', err);
+        this.leadspot = null;
+      }
+    }
 
     // 8. Record startup metadata in daemon_state.
     setDaemonState('daemon_started_at', nowISO());
@@ -105,6 +141,21 @@ export class Daemon {
     if (this.screenpipeClient === null || this.analyzer === null) return;
 
     const config = loadConfig();
+
+    // Pause guard — set via `ambient pause`. Skips both the Obsidian and the
+    // LeadSpot work paths; resumed via `ambient resume`.
+    if (isPaused(getDb())) {
+      this.log.debug('daemon paused — skipping analysis cycle');
+      return;
+    }
+
+    // Cost-cap guard — when LeadSpot is on and Haiku is capped for the day,
+    // skip the cycle entirely. The cap auto-resets at midnight UTC because
+    // cost_telemetry is keyed by day.
+    if (this.leadspot !== null && this.leadspot.isHaikuCapped()) {
+      this.log.debug('Haiku cost cap reached — skipping analysis cycle');
+      return;
+    }
 
     // Determine the start of the window to fetch OCR for.
     const lastPollTime = getDaemonState('last_poll_time');
@@ -156,15 +207,148 @@ export class Daemon {
     };
 
     // ActivityAnalyzer.analyze() persists all results to the store internally.
-    await this.analyzer.analyze(batch);
+    const result = await this.analyzer.analyze(batch);
+
+    // LeadSpot hook: extractor pass + cost telemetry. Best-effort; never
+    // blocks the Obsidian path. Only fires when leadspot.enabled === true
+    // (otherwise this.leadspot is null).
+    if (this.leadspot !== null) {
+      await this.leadspot.runHook(result, entries);
+    }
+
+    // Detect browser deep reads and write to vault.
+    await this.runBrowserCapture(entries);
 
     // Check proactive notification triggers after each analysis cycle.
+    // Pass the freshly-loaded config so changes via saveConfig take effect
+    // next cycle without a daemon restart.
     if (this.proactive) {
       try {
-        await this.proactive.checkAndNotify();
+        await this.proactive.checkAndNotify(config);
       } catch (err) {
         this.log.warn('Proactive check failed (non-fatal)', err);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Browser deep read capture
+  // ---------------------------------------------------------------------------
+
+  private async runBrowserCapture(entries: OcrEntry[]): Promise<void> {
+    const db = getDb();
+    const now = Date.now();
+    const today = new Date().toISOString().substring(0, 10);
+
+    const browserWindows = groupBrowserEntries(entries);
+    if (browserWindows.size === 0) return;
+
+    for (const [stateKey, { appName, windowName, ocrText }] of browserWindows) {
+      // Check or set first-seen time for this window
+      const row = db.prepare(
+        'SELECT value FROM daemon_state WHERE key = ?',
+      ).get(stateKey) as { value: string } | undefined;
+
+      if (!row) {
+        // First time seeing this window — record first-seen timestamp
+        db.prepare(
+          'INSERT OR REPLACE INTO daemon_state (key, value, updated_at) VALUES (?, ?, ?)',
+        ).run(stateKey, new Date().toISOString(), new Date().toISOString());
+        continue;
+      }
+
+      const dwellSeconds = (now - new Date(row.value).getTime()) / 1000;
+      if (dwellSeconds < DEEP_READ_MIN_SECONDS) continue;
+
+      // Dwell threshold crossed — clear state key so we don't re-capture
+      db.prepare('DELETE FROM daemon_state WHERE key = ?').run(stateKey);
+
+      const title = cleanWindowTitle(windowName, appName);
+      if (shouldSkipTitle(title)) continue;
+
+      const url = extractUrl(ocrText.trim());
+      const dedupKey = url ?? `title:${title}:${today}`;
+
+      // Skip if already captured
+      const alreadyCaptured = db.prepare(
+        'SELECT 1 FROM web_captures WHERE url = ?',
+      ).get(dedupKey);
+      if (alreadyCaptured) continue;
+
+      this.log.info(`Browser deep read: "${title}" (${Math.round(dwellSeconds)}s dwell)`);
+
+      try {
+        const config = loadConfig();
+        const topics = await this.extractBrowserTopics(config.anthropicApiKey, title, ocrText.trim());
+
+        const vaultPath = process.env.OBSIDIAN_VAULT_PATH
+          ?? path.join(os.homedir(), 'Desktop/Businesses/Obsidian Notes');
+        const webDir = path.join(vaultPath, 'Sources/Web');
+        fs.mkdirSync(webDir, { recursive: true });
+
+        const lines: string[] = [
+          '---',
+          `title: "${title.replace(/"/g, '\\"')}"`,
+          'source: ambient-browser',
+          'type: web',
+        ];
+        if (url) lines.push(`url: ${url}`);
+        lines.push(`app: ${appName}`, `date: ${today}`, '---', '');
+        if (topics.length > 0) {
+          lines.push(`**Topics**: ${topics.map(t => `[[${t}]]`).join(', ')}`);
+          lines.push('');
+        }
+        lines.push(ocrText.trim().substring(0, 2000), '');
+
+        const safeName = title.replace(/[/\\:*?"<>|]/g, '-').trim().substring(0, 100);
+        const outPath = path.join(webDir, `${today}-${safeName}.md`);
+        fs.writeFileSync(outPath, lines.join('\n'), 'utf8');
+
+        db.prepare(
+          'INSERT OR IGNORE INTO web_captures (url, title, captured_at) VALUES (?, ?, ?)',
+        ).run(dedupKey, title, new Date().toISOString());
+
+        this.log.info(`Web capture written: ${outPath}`);
+      } catch (err) {
+        this.log.warn('Web capture write failed', {
+          title,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Clean up stale dwell keys (> 30 minutes old = user navigated away)
+    db.prepare(
+      `DELETE FROM daemon_state WHERE key LIKE ? AND updated_at < datetime('now', '-30 minutes')`,
+    ).run(`${DWELL_STATE_PREFIX}%`);
+  }
+
+  private async extractBrowserTopics(apiKey: string, title: string, ocrText: string): Promise<string[]> {
+    try {
+      const Anthropic = (await import('@anthropic-ai/sdk')).default;
+      const client = new Anthropic({ apiKey });
+      const response = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content: `Extract 3-5 topic tags from this webpage. Tags should be capitalized and suitable for Obsidian wikilinks (e.g., "AI Automation", "SaaS Building").
+
+Title: ${title}
+Content: ${ocrText.substring(0, 1500)}
+
+Return ONLY a JSON array: ["Tag1", "Tag2", "Tag3"]`,
+        }],
+      });
+      const text = response.content[0].type === 'text' ? response.content[0].text.trim() : '';
+      const match = text.match(/\[.*\]/s);
+      if (match) {
+        const parsed = JSON.parse(match[0]) as unknown;
+        return Array.isArray(parsed) ? (parsed as string[]).slice(0, 5) : [];
+      }
+      return [];
+    } catch {
+      return [];
     }
   }
 
@@ -247,6 +431,9 @@ export class Daemon {
 
     // Stop the scheduler first so no new cycles start during teardown.
     this.scheduler?.stop();
+
+    // Stop the LeadSpot integration timers.
+    this.leadspot?.stop();
 
     // Stop the journal timer.
     if (this.journalTimer) {

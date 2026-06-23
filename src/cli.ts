@@ -233,6 +233,22 @@ program
       if (result.linksCreated && result.linksCreated > 0) {
         console.log(`  Atomic links: ${result.linksCreated}`);
       }
+
+      // Sync to Coder1 if configured (best-effort, non-blocking)
+      try {
+        const { loadConfig } = await import('./config/index.js');
+        const config = loadConfig();
+        if (config.coder1Token && result.filePath) {
+          const { syncToCoder1 } = await import('./coder1/sync.js');
+          const today = new Date();
+          const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+          const noteContent = fs.readFileSync(result.filePath, 'utf8');
+          await syncToCoder1(dateStr, noteContent, config);
+        }
+      } catch (syncErr) {
+        // Never let Coder1 sync failure affect the journal exit code
+        console.warn('[Ambient → Coder1] Sync skipped due to config error:', syncErr instanceof Error ? syncErr.message : syncErr);
+      }
     } else {
       console.log(`\nExport failed: ${result.error}`);
       process.exit(1);
@@ -372,6 +388,363 @@ notebook
       console.log('\nNo notebooks created yet.');
     }
 
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// auth — LeadSpot.AI device login / logout / status
+// ---------------------------------------------------------------------------
+
+const auth = program
+  .command('auth')
+  .description('Manage LeadSpot.AI cloud authentication for this Mac');
+
+auth
+  .command('login')
+  .description('Authorize this Mac with LeadSpot.AI via browser OAuth')
+  .action(async () => {
+    const os = await import('os');
+    const { loginViaLoopback } = await import('./leadspot/index.js');
+    const { loadConfig, saveConfig } = await import('./config/index.js');
+    const config = loadConfig();
+    const baseUrl = config.leadspot.base_url;
+    const deviceLabel = os.hostname();
+    console.log(`Opening browser at ${baseUrl}/api/daemon/auth ... click "Authorize this Mac".`);
+    try {
+      const creds = await loginViaLoopback(baseUrl, deviceLabel);
+      // Flip enabled + persist daemon_id / organization_id so the daemon picks
+      // them up on next start without needing env vars.
+      saveConfig({
+        leadspot: {
+          ...config.leadspot,
+          enabled: true,
+          daemon_id: creds.daemon_id,
+          organization_id: creds.organization_id,
+        },
+      });
+      const shortId = creds.daemon_id.slice(0, 8);
+      console.log(`Authenticated as ${creds.user_email}. Daemon ID: ${shortId}.`);
+      console.log('Run `ambient start` to begin auto-logging.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Login failed: ${msg}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+
+auth
+  .command('logout')
+  .description('Revoke local credentials and delete refresh token from Keychain')
+  .action(async () => {
+    const { logout } = await import('./leadspot/index.js');
+    const { loadConfig, saveConfig } = await import('./config/index.js');
+    const config = loadConfig();
+    const daemonId = config.leadspot.daemon_id;
+    if (daemonId === '') {
+      console.log('Not authenticated. Nothing to do.');
+      process.exit(0);
+    }
+    try {
+      await logout(daemonId);
+      saveConfig({
+        leadspot: { ...config.leadspot, enabled: false, daemon_id: '', organization_id: '' },
+      });
+      console.log('Logged out. Refresh token deleted from Keychain.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Logout failed: ${msg}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+
+auth
+  .command('status')
+  .description('Show LeadSpot.AI authentication status')
+  .action(async () => {
+    const { getAuthStatus } = await import('./leadspot/index.js');
+    const { loadConfig } = await import('./config/index.js');
+    const config = loadConfig();
+    const daemonId = config.leadspot.daemon_id;
+    if (daemonId === '') {
+      console.log('Not authenticated. Run: ambient auth login');
+      process.exit(0);
+    }
+    const status = await getAuthStatus(daemonId);
+    if (!status.authenticated) {
+      console.log('Not authenticated. Run: ambient auth login');
+    } else {
+      console.log(`Authenticated as ${status.userEmail}`);
+      console.log(`Device:          ${status.deviceLabel}`);
+      console.log(`Organization:    ${status.organizationId}`);
+      console.log(`Daemon ID:       ${daemonId.slice(0, 8)}…`);
+    }
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// identity — manage self-identity aliases (drop signals about yourself)
+// ---------------------------------------------------------------------------
+
+const identity = program
+  .command('identity')
+  .description('Manage self-identity aliases (your own emails — auto-logs are dropped)');
+
+identity
+  .command('add <email>')
+  .description('Add an email as one of your own (signals matching it are dropped)')
+  .action(async (email: string) => {
+    const { addAlias } = await import('./leadspot/index.js');
+    const { getDb } = await import('./storage/db.js');
+    try {
+      await addAlias(getDb(), email, 'user_added');
+      console.log(`Added ${email} to self-identity.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Failed to add alias: ${msg}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+
+identity
+  .command('remove <email>')
+  .description('Remove an email from self-identity')
+  .action(async (email: string) => {
+    const { removeAlias } = await import('./leadspot/index.js');
+    const { getDb } = await import('./storage/db.js');
+    const removed = await removeAlias(getDb(), email);
+    console.log(removed ? `Removed ${email} from self-identity.` : `${email} was not in self-identity.`);
+    process.exit(0);
+  });
+
+identity
+  .command('list')
+  .description('Show all self-identity aliases (hash-only; raw emails are not stored)')
+  .action(async () => {
+    const { listAliases } = await import('./leadspot/index.js');
+    const { getDb } = await import('./storage/db.js');
+    const rows = listAliases(getDb());
+    if (rows.length === 0) {
+      console.log('No self-identity aliases. Add with: ambient identity add <email>');
+    } else {
+      console.log(`${rows.length} alias${rows.length === 1 ? '' : 'es'}:`);
+      for (const row of rows) {
+        const added = new Date(row.addedAt).toISOString();
+        console.log(`  ${row.emailHash.slice(0, 12)}…  ${row.source.padEnd(11)}  added=${added}`);
+      }
+    }
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// review — held signals (low confidence + pending toasts)
+// ---------------------------------------------------------------------------
+
+program
+  .command('review')
+  .description('Show held LeadSpot signals awaiting review')
+  .option('--pending', 'Also show pending toasts (from ~/.ambient/pending_toasts.json)')
+  .action(async (options: { pending?: boolean }) => {
+    const { getDb } = await import('./storage/db.js');
+    const db = getDb();
+    const rows = db
+      .prepare(
+        `SELECT id, extractor, summary, confidence
+           FROM leadspot_signals
+          WHERE state = 'held'
+          ORDER BY observed_at DESC
+          LIMIT 200`,
+      )
+      .all() as Array<{ id: string; extractor: string; summary: string; confidence: number }>;
+
+    if (rows.length === 0) {
+      console.log('No held signals.');
+    } else {
+      console.log(`${rows.length} held signal${rows.length === 1 ? '' : 's'}:`);
+      console.log('');
+      for (const r of rows) {
+        const id = r.id.slice(0, 8);
+        const summary = r.summary.length > 80 ? r.summary.slice(0, 77) + '…' : r.summary;
+        console.log(`  ${id}  ${r.extractor.padEnd(18)}  conf=${r.confidence}  ${summary}`);
+      }
+    }
+
+    if (options.pending === true) {
+      try {
+        const pathMod = await import('path');
+        const fsMod = await import('fs');
+        const { PATHS } = await import('./config/paths.js');
+        const file = pathMod.join(PATHS.dataDir, 'pending_toasts.json');
+        if (fsMod.existsSync(file)) {
+          const raw = JSON.parse(fsMod.readFileSync(file, 'utf8')) as Array<{
+            signal_id: string;
+            summary: string;
+            shown_at: number;
+          }>;
+          if (raw.length === 0) {
+            console.log('\nNo pending toasts.');
+          } else {
+            console.log(`\n${raw.length} pending toast${raw.length === 1 ? '' : 's'}:`);
+            for (const t of raw) {
+              const age = Math.round((Date.now() - t.shown_at) / 1000);
+              console.log(`  ${t.signal_id.slice(0, 8)}  age=${age}s  ${t.summary}`);
+            }
+          }
+        } else {
+          console.log('\nNo pending toasts file.');
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`Failed to read pending toasts: ${msg}`);
+      }
+    }
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// pause / resume — temporarily disable all daemon work
+// ---------------------------------------------------------------------------
+
+program
+  .command('pause [duration]')
+  .description('Pause the daemon: 1h | today | forever (default 1h)')
+  .action(async (duration: string | undefined) => {
+    const { setPause, parsePauseDuration } = await import('./state/pause.js');
+    const { getDb } = await import('./storage/db.js');
+    const arg = duration ?? '1h';
+    let until;
+    try {
+      until = parsePauseDuration(arg);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+    setPause(getDb(), until);
+    if (until === 'forever') {
+      console.log('Daemon paused indefinitely. Resume with: ambient resume');
+    } else {
+      console.log(`Daemon paused until ${new Date(until).toLocaleString()}.`);
+    }
+    process.exit(0);
+  });
+
+program
+  .command('resume')
+  .description('Resume the daemon if paused')
+  .action(async () => {
+    const { setPause } = await import('./state/pause.js');
+    const { getDb } = await import('./storage/db.js');
+    setPause(getDb(), null);
+    console.log('Daemon resumed. Next polling cycle will run normally.');
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// cost — today's Haiku spend + cap status
+// ---------------------------------------------------------------------------
+
+program
+  .command('cost')
+  .description("Show today's Haiku token usage and cap status")
+  .action(async () => {
+    const { getTodayUsage } = await import('./leadspot/index.js');
+    const { getDb } = await import('./storage/db.js');
+    const usage = getTodayUsage(getDb());
+    const totalIn = usage.haiku_tokens_in;
+    const totalOut = usage.haiku_tokens_out;
+    const total = totalIn + totalOut;
+    // Plan §15: hard cap is $1.50/day. Haiku 4.5 list is ~$1/M in, ~$5/M out.
+    // 50k tokens is the local guardrail in ActivityAnalyzer.
+    const localBudget = 50_000;
+    const pct = Math.round((total / localBudget) * 100);
+    console.log(`Day: ${usage.day}`);
+    console.log(`Haiku tokens: ${total.toLocaleString()} / ${localBudget.toLocaleString()} (${pct}%)`);
+    console.log(`  in:  ${totalIn.toLocaleString()}`);
+    console.log(`  out: ${totalOut.toLocaleString()}`);
+    console.log(`Cost capped: ${usage.cost_capped_today === 1 ? 'yes' : 'no'}`);
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// diagnostics — recent state + outbox + last errors
+// ---------------------------------------------------------------------------
+
+program
+  .command('diagnostics')
+  .description('Dump daemon state, recent errors, and last 10 promotion failures')
+  .action(async () => {
+    const { getDb } = await import('./storage/db.js');
+    const { getPauseInfo } = await import('./state/pause.js');
+    const db = getDb();
+
+    // Daemon state values.
+    const stateRows = db
+      .prepare("SELECT key, value, updated_at FROM daemon_state ORDER BY key")
+      .all() as Array<{ key: string; value: string; updated_at: string }>;
+    console.log('Daemon state:');
+    for (const r of stateRows) {
+      console.log(`  ${r.key.padEnd(30)} = ${r.value}  (${r.updated_at})`);
+    }
+
+    const pause = getPauseInfo(db);
+    console.log(
+      `Pause: ${pause === null ? 'inactive' : pause.until === 'forever' ? 'forever' : new Date(pause.until).toISOString()}`,
+    );
+
+    // Outbox / promotion errors (last 10 failures).
+    const outboxRows = db
+      .prepare(
+        `SELECT signal_id, attempts, last_error, next_attempt_at
+           FROM leadspot_outbox
+          WHERE last_error IS NOT NULL
+          ORDER BY next_attempt_at DESC
+          LIMIT 10`,
+      )
+      .all() as Array<{
+        signal_id: string;
+        attempts: number;
+        last_error: string;
+        next_attempt_at: number;
+      }>;
+    console.log(`\nOutbox errors (last ${outboxRows.length}):`);
+    for (const r of outboxRows) {
+      console.log(`  ${r.signal_id.slice(0, 8)}  attempts=${r.attempts}  ${r.last_error.slice(0, 100)}`);
+    }
+
+    // Recent error_events.
+    const errors = db
+      .prepare(
+        `SELECT error_text, app_name, occurrence_count, last_seen
+           FROM error_events
+          ORDER BY last_seen DESC
+          LIMIT 10`,
+      )
+      .all() as Array<{
+        error_text: string;
+        app_name: string | null;
+        occurrence_count: number;
+        last_seen: string;
+      }>;
+    console.log(`\nRecent error events (${errors.length}):`);
+    for (const e of errors) {
+      console.log(`  [${e.app_name ?? '-'}] ×${e.occurrence_count}  ${e.error_text.slice(0, 100)}  (${e.last_seen})`);
+    }
+
+    process.exit(0);
+  });
+
+// ---------------------------------------------------------------------------
+// update — placeholder for Sparkle auto-update
+// ---------------------------------------------------------------------------
+
+program
+  .command('update')
+  .description('Update the daemon to the latest version')
+  .action(() => {
+    console.log('Auto-update via Sparkle is not yet implemented.');
+    console.log('Run: npm install -g coder1-ambient@latest');
     process.exit(0);
   });
 

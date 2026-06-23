@@ -20,8 +20,10 @@
   <nav>
     <button class="tab active" data-tab="activity">Activity</button>
     <button class="tab" data-tab="knowledge">Knowledge</button>
+    <button class="tab" data-tab="tasks">Tasks</button>
     <button class="tab" data-tab="errors">Errors</button>
     <button class="tab" data-tab="goals">Goals</button>
+    <button class="tab" data-tab="ask">Ask</button>
   </nav>
 
   <main>
@@ -43,12 +45,31 @@
       <div id="knowledge-list" class="card-list">Loading...</div>
     </section>
 
+    <section id="tasks" class="tab-content">
+      <div class="controls">
+        <select id="tasks-filter">
+          <option value="open" selected>Open</option>
+          <option value="overdue">Overdue</option>
+          <option value="upcoming">Upcoming (48h)</option>
+        </select>
+      </div>
+      <div id="tasks-list" class="card-list">Loading...</div>
+    </section>
+
     <section id="errors" class="tab-content">
       <div id="errors-list" class="card-list">Loading...</div>
     </section>
 
     <section id="goals" class="tab-content">
       <div id="goals-list" class="card-list">Loading...</div>
+    </section>
+
+    <section id="ask" class="tab-content">
+      <div class="controls">
+        <input type="text" id="ask-input" placeholder="Ask anything about your past work…" style="flex:1" />
+        <button id="ask-send">Ask</button>
+      </div>
+      <div id="ask-answer" class="card-list">Ask a question — e.g. "what did I decide about pricing?"</div>
     </section>
   </main>
 
