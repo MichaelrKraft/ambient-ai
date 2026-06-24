@@ -29,10 +29,15 @@ import {
   getRecentNotifications,
   getOverdueTasks,
   getGoalsNeedingNudge,
+  getDailyAlignmentMinutes,
+  getDailyIntentions,
+  getGoalAlignedMinutesForDate,
+  getActiveGoals,
   markErrorNotified,
   insertNotification,
   localDateString,
   type ErrorEvent,
+  type IntentionItem,
 } from '../storage/AmbientStore.js';
 import { sendNotification, type NotificationChannel } from './channels.js';
 
@@ -48,6 +53,7 @@ export class ProactiveEngine {
     // Priority 1 (imminent meeting) is added in Phase 4 — checkUpcomingMeetings.
     if (fired === 0) fired += await this.checkOverdueTasks(config);
     if (fired === 0) fired += await this.checkStuckErrors(config);
+    if (fired === 0) fired += await this.checkDrift(config);
     if (fired === 0) fired += await this.checkGoalProgress(config);
     return fired;
   }
@@ -172,6 +178,67 @@ export class ProactiveEngine {
 
       this.log.info('Stuck-error notification sent', { errorId: error.id, durationH, app: appLabel });
       return 1; // one alert per cycle
+    }
+
+    return 0;
+  }
+
+  /**
+   * Midday drift: once a meaningful chunk of the day is tracked, nudge if a
+   * goal-linked top-3 intention has ~no aligned activity — or, absent linked
+   * intentions, if Tier-1 goals exist but got ~no time. One nudge per day.
+   */
+  private async checkDrift(config: AmbientConfig): Promise<number> {
+    const MIN_TRACKED_MINUTES = 90; // enough of the day to judge fairly
+    const MIN_ALIGNED_MINUTES = 5; // below this counts as "untouched"
+
+    const today = localDateString();
+    const token = `[drift:${today}]`;
+    if (this.recentlyNotified(token, 24)) return 0;
+
+    let total = 0;
+    let tier1 = 0;
+    let intentions: IntentionItem[] = [];
+    try {
+      ({ total, tier1 } = getDailyAlignmentMinutes(today));
+      intentions = getDailyIntentions(today);
+    } catch (err) {
+      this.log.warn('Drift check query failed', { error: String(err) });
+      return 0;
+    }
+    if (total < MIN_TRACKED_MINUTES) return 0;
+
+    // (a) A goal-linked, unfinished intention with ~no aligned activity today.
+    for (const it of intentions) {
+      if (it.done || !it.goal_id) continue;
+      let aligned = 0;
+      try {
+        aligned = getGoalAlignedMinutesForDate(it.goal_id, today);
+      } catch {
+        aligned = 0;
+      }
+      if (aligned < MIN_ALIGNED_MINUTES) {
+        const message =
+          `\u{1F9ED} *Drifting:* ${total}m tracked today, but nothing yet on *${it.text}*.\n${token}`;
+        await this.fire(config, 'ambient: Drift', message);
+        this.log.info('Drift nudge sent (intention untouched)');
+        return 1;
+      }
+    }
+
+    // (b) No measurable linked intention, but Tier-1 goals exist and got ~no time.
+    let hasTier1 = false;
+    try {
+      hasTier1 = getActiveGoals().some((g) => g.tier === 1);
+    } catch {
+      hasTier1 = false;
+    }
+    if (hasTier1 && tier1 < MIN_ALIGNED_MINUTES) {
+      const message =
+        `\u{1F9ED} *Drifting:* ${total}m tracked today, but no time yet on your Tier-1 goals.\n${token}`;
+      await this.fire(config, 'ambient: Drift', message);
+      this.log.info('Drift nudge sent (no Tier-1 time)');
+      return 1;
     }
 
     return 0;

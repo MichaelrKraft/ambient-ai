@@ -9,25 +9,57 @@
 <body>
   <header>
     <h1>ambient</h1>
-    <div id="status-bar">
-      <span id="status-dot" class="dot running"></span>
-      <span id="status-text">Running</span>
-      <span id="token-count">0 / 50k tokens today</span>
-      <span id="last-poll">Last poll: —</span>
+    <div class="header-right">
+      <div id="status-bar">
+        <span id="status-dot" class="dot running"></span>
+        <span id="status-text">Running</span>
+        <span id="token-count">0 / 50k tokens today</span>
+        <span id="last-poll">Last poll: —</span>
+      </div>
+      <div id="settings">
+        <button id="settings-gear" aria-label="Settings" aria-haspopup="true" aria-expanded="false">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+        <div id="settings-menu" hidden>
+          <button class="settings-item" data-action="settings">Settings</button>
+          <button class="settings-item" data-action="errors">Errors</button>
+          <div class="settings-divider"></div>
+          <button class="settings-item" data-action="logout">Log out</button>
+          <div id="settings-note" hidden></div>
+        </div>
+      </div>
     </div>
   </header>
 
   <nav>
-    <button class="tab active" data-tab="activity">Activity</button>
+    <button class="tab active" data-tab="morning-coffee">Morning Coffee</button>
+    <button class="tab" data-tab="activity">Activity</button>
+    <button class="tab" data-tab="time">Time</button>
     <button class="tab" data-tab="knowledge">Knowledge</button>
     <button class="tab" data-tab="tasks">Tasks</button>
-    <button class="tab" data-tab="errors">Errors</button>
     <button class="tab" data-tab="goals">Goals</button>
-    <button class="tab" data-tab="ask">Ask</button>
   </nav>
 
+  <!-- Global Ask bar — always visible, on every tab. -->
+  <div id="ask-bar">
+    <input type="text" id="ask-input" placeholder="Ask anything about your past work — e.g. &quot;what did I decide about pricing?&quot;" />
+    <button id="ask-send">Ask</button>
+    <button id="ask-clear" hidden>Clear</button>
+  </div>
+  <div id="ask-answer" hidden></div>
+
   <main>
-    <section id="activity" class="tab-content active">
+    <section id="morning-coffee" class="tab-content active">
+      <iframe id="brief-frame" class="brief-frame" title="Morning Coffee brief" hidden></iframe>
+      <div id="brief-empty" class="empty-state" hidden>
+        No brief yet — generate one with the morning-brief skill, then refresh.
+      </div>
+    </section>
+
+    <section id="activity" class="tab-content">
       <div class="controls">
         <select id="activity-hours">
           <option value="8">Last 8 hours</option>
@@ -38,6 +70,17 @@
       <div id="activity-list" class="card-list">Loading...</div>
     </section>
 
+    <section id="time" class="tab-content">
+      <div class="controls">
+        <select id="time-hours">
+          <option value="8">Last 8 hours</option>
+          <option value="24" selected>Last 24 hours</option>
+          <option value="48">Last 48 hours</option>
+        </select>
+      </div>
+      <div id="time-breakdown">Loading...</div>
+    </section>
+
     <section id="knowledge" class="tab-content">
       <div class="controls">
         <input type="text" id="knowledge-search" placeholder="Search knowledge..." />
@@ -46,14 +89,15 @@
     </section>
 
     <section id="tasks" class="tab-content">
-      <div class="controls">
-        <select id="tasks-filter">
-          <option value="open" selected>Open</option>
-          <option value="overdue">Overdue</option>
-          <option value="upcoming">Upcoming (48h)</option>
-        </select>
-      </div>
-      <div id="tasks-list" class="card-list">Loading...</div>
+      <form id="task-add" class="task-add">
+        <input type="text" id="task-input" placeholder="Add a to-do…" autocomplete="off" />
+        <input type="date" id="task-due" title="Due date (optional)" />
+        <select id="task-goal" title="Link to a goal (optional)"><option value="">No goal</option></select>
+        <button type="submit">Add</button>
+      </form>
+      <div id="task-counts" class="task-counts"></div>
+      <div id="tasks-board">Loading…</div>
+      <div id="task-toast" class="task-toast" hidden></div>
     </section>
 
     <section id="errors" class="tab-content">
@@ -61,15 +105,120 @@
     </section>
 
     <section id="goals" class="tab-content">
-      <div id="goals-list" class="card-list">Loading...</div>
+      <div id="focus-score" class="focus-score">Loading…</div>
+
+      <div class="tracker-block">
+        <div class="goals-head">
+          <h3 class="tracker-h">Goals</h3>
+          <button type="button" id="goal-add-toggle" class="add-toggle">+ Add goal</button>
+        </div>
+        <form id="goal-form" class="goal-form" hidden>
+          <input type="text" id="goal-title" placeholder="New goal — e.g. Land AI Leverage Map client #1" required />
+          <input type="text" id="goal-description" placeholder="Description (optional)" />
+          <input type="date" id="goal-target" title="Target date (optional)" />
+          <label class="goal-tier-label" title="Counts toward your daily Focus Score"><input type="checkbox" id="goal-tier" /> Tier-1</label>
+          <button type="submit">Add goal</button>
+        </form>
+        <div id="goal-form-error" class="form-error" hidden></div>
+        <div id="goals-list" class="card-list">Loading...</div>
+      </div>
+
+      <div class="tracker-block">
+        <h3 class="tracker-h">This Week's Focus</h3>
+        <div class="tracker-actions">
+          <input type="text" id="weekly-focus-title" placeholder="What's this week about?" style="flex:1" />
+          <button type="button" id="weekly-focus-save" class="list-add">Save</button>
+          <span id="weekly-focus-status" class="settings-status"></span>
+        </div>
+      </div>
+
+      <div class="tracker-block">
+        <h3 class="tracker-h">Today's Top 3</h3>
+        <p class="tracker-sub">What actually matters today. Link each to a goal so Ambient can tell if you advanced it.</p>
+        <div id="intentions-editor"></div>
+        <div class="tracker-actions">
+          <button type="button" id="intentions-save" class="list-add">Save today's 3</button>
+          <span id="intentions-status" class="settings-status"></span>
+        </div>
+      </div>
     </section>
 
-    <section id="ask" class="tab-content">
-      <div class="controls">
-        <input type="text" id="ask-input" placeholder="Ask anything about your past work…" style="flex:1" />
-        <button id="ask-send">Ask</button>
+    <section id="settings-page" class="tab-content">
+      <div class="settings-form">
+        <h2 class="settings-form-title">Morning Brief Settings</h2>
+        <p class="settings-form-sub">Configure your brief. Command Center &amp; section changes apply via “Apply now”; tracked lists &amp; sources take effect on the next full generation.</p>
+
+        <fieldset class="settings-group">
+          <legend>Command Center</legend>
+          <div class="settings-sub-group">
+            <h4>This Week's Hero</h4>
+            <label>Title<input data-cc="heroContent.title" /></label>
+            <label>Status<input data-cc="heroContent.statusLabel" /></label>
+            <label>Publish target<input data-cc="heroContent.publishTarget" type="date" /></label>
+            <label>Notes<input data-cc="heroContent.notes" /></label>
+          </div>
+          <div class="settings-sub-group">
+            <h4>Ship Lane</h4>
+            <label>App<input data-cc="shipLane.appName" /></label>
+            <label>Milestone<input data-cc="shipLane.milestone" /></label>
+            <label>% complete<input data-cc="shipLane.percentComplete" type="number" /></label>
+            <label>Target date<input data-cc="shipLane.targetDate" type="date" /></label>
+            <label>Next step<input data-cc="shipLane.nextStep" /></label>
+          </div>
+          <div class="settings-sub-group">
+            <h4>Pipeline</h4>
+            <label>Discovery calls<input data-cc="goAutomatedPipeline.discoveryCalls" type="number" /></label>
+            <label>Proposals out<input data-cc="goAutomatedPipeline.proposalsOut" type="number" /></label>
+            <label>Signed clients<input data-cc="goAutomatedPipeline.signedClients" type="number" /></label>
+            <label>Retainer MRR<input data-cc="goAutomatedPipeline.retainerMRR" type="number" /></label>
+            <label>Notes<input data-cc="goAutomatedPipeline.notes" /></label>
+          </div>
+          <div class="settings-sub-group">
+            <h4>Weekly Rhythm</h4>
+            <div id="rhythm-editor"></div>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>Tracked YouTubers</legend>
+          <div id="youtubers-list" class="list-editor"></div>
+          <button type="button" class="list-add" data-add-youtuber>+ Add creator</button>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>Competitors</legend>
+          <div id="competitors-groups"></div>
+          <div class="competitor-add-cat">
+            <input id="new-competitor-cat" placeholder="New category name (e.g. aiConsulting)" />
+            <button type="button" id="add-competitor-cat">+ Add category</button>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>Newsletter source</legend>
+          <label>Google Doc URL<input id="set-newsletterDocUrl" placeholder="https://docs.google.com/document/d/.../edit" /></label>
+          <p class="settings-hint">Share the doc “anyone with the link”. The brief pulls newsletter links from it.</p>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>Locale &amp; schedule</legend>
+          <label>Weather location<input id="set-location" placeholder="Littleton, CO" /></label>
+          <label>Delivery time<input id="set-deliveryTime" placeholder="7:00 AM MST" /></label>
+          <label>Telegram notify time<input id="set-telegramNotifyTime" placeholder="8:00 AM MST" /></label>
+          <label>Weekly budget ($)<input id="set-weeklyBudget" type="number" /></label>
+        </fieldset>
+
+        <fieldset class="settings-group">
+          <legend>Sections (show / hide)</legend>
+          <div id="sections-toggles" class="toggles"></div>
+        </fieldset>
+
+        <div class="settings-actions">
+          <button type="button" id="settings-save">Save</button>
+          <button type="button" id="settings-apply">Apply now (re-render)</button>
+          <span id="settings-status" class="settings-status"></span>
+        </div>
       </div>
-      <div id="ask-answer" class="card-list">Ask a question — e.g. "what did I decide about pricing?"</div>
     </section>
   </main>
 

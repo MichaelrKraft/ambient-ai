@@ -57,6 +57,93 @@ h1 {
   color: var(--text-muted);
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* ------------------------------------------------------------------
+   Morning Coffee — embedded brief iframe
+------------------------------------------------------------------ */
+
+.brief-frame {
+  width: 100%;
+  height: calc(100vh - 120px);
+  border: 0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+/* ------------------------------------------------------------------
+   Settings gear + dropdown
+------------------------------------------------------------------ */
+
+#settings {
+  position: relative;
+}
+
+#settings-gear {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+}
+
+#settings-gear:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+#settings-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 20;
+}
+
+.settings-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.settings-item:hover {
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.settings-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 0;
+}
+
+#settings-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 6px 10px 4px;
+  line-height: 1.5;
+}
+
 .dot {
   width: 8px;
   height: 8px;
@@ -348,6 +435,899 @@ input[type="text"]::placeholder {
 }
 
 /* ------------------------------------------------------------------
+   Global Ask bar (sticky, present on every tab)
+------------------------------------------------------------------ */
+
+#ask-bar {
+  display: flex;
+  gap: 8px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 100px;
+  z-index: 8;
+}
+
+/* The `hidden` attribute must beat the display:flex above (else it never hides). */
+#ask-bar[hidden] {
+  display: none;
+}
+
+#ask-bar input[type="text"] {
+  flex: 1;
+  width: auto;
+}
+
+#ask-bar button {
+  background: var(--accent);
+  border: none;
+  color: #0d1117;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+#ask-bar button:hover {
+  filter: brightness(1.08);
+}
+
+#ask-bar #ask-clear {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+#ask-answer {
+  margin: 12px 24px 0;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+/* ------------------------------------------------------------------
+   Time breakdown bars
+------------------------------------------------------------------ */
+
+.breakdown-total {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 16px;
+}
+
+.breakdown-group {
+  margin-bottom: 24px;
+}
+
+.breakdown-caption {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: -12px 0 24px;
+}
+
+.breakdown-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 10px;
+}
+
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.bar-label {
+  flex: 0 0 160px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar-track {
+  flex: 1;
+  height: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 6px 0 0 6px;
+}
+
+.bar-value {
+  flex: 0 0 110px;
+  text-align: right;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------
+   Goal creation form
+------------------------------------------------------------------ */
+
+.goals-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.goals-head .tracker-h {
+  margin-bottom: 0;
+}
+
+.add-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.add-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.goal-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+/* The `hidden` attribute must beat display:flex (collapsed by default). */
+.goal-form[hidden] {
+  display: none;
+}
+
+.goal-form input[type="text"] {
+  width: auto;
+}
+
+.goal-form #goal-title {
+  flex: 1 1 280px;
+}
+
+.goal-form #goal-description {
+  flex: 1 1 200px;
+}
+
+.goal-form input[type="date"] {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  color-scheme: dark;
+}
+
+.goal-form button {
+  background: var(--accent);
+  border: none;
+  color: #0d1117;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.goal-form button:hover {
+  filter: brightness(1.08);
+}
+
+.form-error {
+  color: var(--error);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+/* ------------------------------------------------------------------
+   Settings page (morning-brief config editor)
+------------------------------------------------------------------ */
+
+/* White settings page — flip the theme variables to a light palette scoped to
+   this section so all the form text/inputs stay readable on white. */
+#settings-page {
+  background: #ffffff;
+  --text: #1a1a1a;
+  --text-muted: #55585f;
+  --surface: #f3f4f6;
+  --border: #d2d6dc;
+  border-radius: 10px;
+  padding: 24px;
+  min-height: calc(100vh - 170px);
+}
+
+.settings-form {
+  max-width: 760px;
+}
+
+.settings-form-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.settings-form-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.settings-group {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.settings-group legend {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  padding: 0 6px;
+}
+
+.settings-sub-group {
+  margin-bottom: 16px;
+}
+
+.settings-sub-group h4 {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.settings-group label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.settings-group label input,
+.settings-group label select {
+  width: 100%;
+}
+
+.settings-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* list editor rows (youtubers / competitors) */
+.list-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.list-row .li-name {
+  flex: 0 0 200px;
+}
+
+.list-row .li-term {
+  flex: 1;
+}
+
+.li-remove {
+  flex: 0 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 6px;
+  width: 34px;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.li-remove:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.list-add {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.list-add:hover {
+  border-color: var(--accent);
+}
+
+.competitor-cat {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.competitor-cat-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.cat-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cat-remove:hover {
+  color: var(--error);
+}
+
+.competitor-add-cat {
+  display: flex;
+  gap: 8px;
+}
+
+.competitor-add-cat input {
+  flex: 1;
+}
+
+.rhythm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.rhythm-day {
+  flex: 0 0 36px;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.rhythm-row .rhythm-task {
+  flex: 1;
+}
+
+.toggles {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.settings-actions button {
+  background: var(--accent);
+  border: none;
+  color: #0d1117;
+  padding: 9px 18px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.settings-actions #settings-apply {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.settings-actions button:hover {
+  filter: brightness(1.08);
+}
+
+.settings-status {
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------------
+   Goals & Tracker
+------------------------------------------------------------------ */
+
+.tracker-block {
+  margin-bottom: 24px;
+}
+
+.tracker-h {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.tracker-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.tracker-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+/* Breathing room between the add-goal form and the goal cards. */
+#goals-list {
+  margin-top: 24px;
+}
+
+/* Collapsible goal cards (closed by default) */
+.goal-card {
+  padding: 0;
+}
+
+.goal-card > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+.goal-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.goal-summary .card-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.goal-summary::after {
+  content: '▸';
+  color: var(--text-muted);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+
+.goal-card[open] .goal-summary::after {
+  transform: rotate(90deg);
+}
+
+.goal-body {
+  padding: 0 16px 16px;
+}
+
+.goal-meta-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+/* Clear separation between the tracker sections (Goals / Focus / Top 3). */
+.tracker-block + .tracker-block {
+  border-top: 1px solid var(--border);
+  padding-top: 24px;
+}
+
+/* Focus score banner */
+.focus-score {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex-wrap: wrap;
+  padding: 4px 2px 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fs-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fs-num {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.fs-label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.fs-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.fs-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 28px;
+  flex: 1;
+  min-width: 100px;
+}
+
+.spark-bar {
+  flex: 1;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+  opacity: 0.45;
+  min-height: 3px;
+}
+
+.fs-counts {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.fs-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.fs-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.fs-dot.ok {
+  background: var(--success);
+}
+.fs-dot.warn {
+  background: var(--warning);
+}
+.fs-dot.bad {
+  background: var(--error);
+}
+
+/* Intention rows */
+.intention-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.intention-row .int-text {
+  flex: 1;
+}
+
+.intention-row .int-goal {
+  flex: 0 0 200px;
+}
+
+.intention-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* Tier star toggle on goal cards */
+.tier-toggle {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.tier-toggle.on {
+  color: var(--warning);
+}
+
+.goal-tier-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Done / Remove actions on goal cards */
+.goal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.goal-done,
+.goal-remove {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.goal-done:hover {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.goal-remove:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.goal-done:disabled,
+.goal-remove:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ------------------------------------------------------------------
+   Tasks hub
+------------------------------------------------------------------ */
+
+.task-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.task-add #task-input {
+  flex: 1 1 260px;
+  width: auto;
+}
+
+.task-add input[type="date"],
+.task-add select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  color-scheme: dark;
+}
+
+.task-add button {
+  background: var(--accent);
+  border: none;
+  color: #0d1117;
+  padding: 8px 18px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.task-counts {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+.task-section {
+  margin-bottom: 20px;
+}
+
+.task-section-h {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  cursor: default;
+}
+
+details.task-section > summary.task-section-h {
+  cursor: pointer;
+  list-style: none;
+}
+
+details.task-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.task-overdue .task-section-h {
+  color: var(--error);
+}
+
+.task-count {
+  display: inline-block;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 0 7px;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.task-inbox {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  margin-bottom: 8px;
+  transition: opacity 0.2s;
+}
+
+.task-row.completing {
+  opacity: 0.4;
+}
+
+.task-check {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.task-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--text);
+  cursor: text;
+}
+
+.task-text.struck {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.task-chip {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 2px 8px;
+}
+
+.task-chip.goal {
+  color: var(--accent);
+  border-color: rgba(88, 166, 255, 0.3);
+}
+
+.task-edit,
+.task-del,
+.sug-accept,
+.sug-dismiss,
+.task-reopen,
+.edit-save,
+.edit-cancel {
+  flex-shrink: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.task-edit:hover,
+.task-reopen:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.task-del:hover,
+.sug-dismiss:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.sug-accept,
+.edit-save {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1117;
+  font-weight: 500;
+}
+
+.task-row.editing {
+  gap: 8px;
+}
+
+.task-row.editing .edit-text {
+  flex: 1 1 auto;
+}
+
+/* Undo toast */
+.task-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 30;
+}
+
+.toast-action {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------------
    Responsive adjustments
 ------------------------------------------------------------------ */
 
@@ -369,5 +1349,22 @@ input[type="text"]::placeholder {
 
   main {
     padding: 16px;
+  }
+
+  #ask-bar {
+    padding: 12px 16px;
+    position: static;
+  }
+
+  #ask-answer {
+    margin: 12px 16px 0;
+  }
+
+  .bar-label {
+    flex-basis: 96px;
+  }
+
+  .bar-value {
+    flex-basis: 84px;
   }
 }

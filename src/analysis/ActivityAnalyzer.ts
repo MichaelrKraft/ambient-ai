@@ -366,6 +366,12 @@ export class ActivityAnalyzer {
 
     store.addDailyTokenCount(tokenCost);
 
+    // The goal this cycle most advanced (highest confidence), if any — stamped
+    // on the session so time-per-goal and the Focus Score are simple sums.
+    const dominantGoal = result.goalProgress.length
+      ? [...result.goalProgress].sort((a, b) => b.confidence - a.confidence)[0]
+      : null;
+
     store.insertActivitySession({
       period_start: periodStart,
       period_end: periodEnd,
@@ -374,6 +380,7 @@ export class ActivityAnalyzer {
       category: result.activity.category,
       apps_seen: result.activity.appsPresent,
       token_cost: tokenCost,
+      aligned_goal_id: dominantGoal ? dominantGoal.goalId : undefined,
     });
 
     for (const knowledge of result.knowledge) {
@@ -408,6 +415,8 @@ export class ActivityAnalyzer {
         due_date: task.dueDate ?? undefined,
         confidence: task.confidence,
         is_pii_flagged: isPIISuspicious(task.content),
+        source: 'auto',
+        accepted: false, // lands in the "Ambient noticed" suggestions inbox
       });
     }
 

@@ -11,7 +11,11 @@
  */
 
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import crypto from 'crypto';
+import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import type { Request, Response } from 'express';
@@ -22,14 +26,40 @@ import {
   getRecentKnowledge,
   getUnresolvedErrors,
   getActiveGoals,
+  insertGoal,
+  setGoalTier,
+  completeGoal,
+  deleteGoal,
+  setDailyIntentions,
+  getDailyIntentions,
+  setWeeklyFocus,
+  getCurrentWeeklyFocus,
+  mondayOf,
+  getScorecard,
+  getScorecardTrend,
+  localDateString,
+  getTimeBreakdown,
   getOpenTasks,
   getOverdueTasks,
   getUpcomingTasks,
   markTaskDone,
+  insertManualTask,
+  getSuggestedTasks,
+  getTaskById,
+  reopenTask,
+  acceptTask,
+  dismissTask,
+  deleteTask,
+  updateTask,
+  getTasksDoneOnDate,
+  insertGoalProgress,
   getDailyTokenCount,
   addDailyTokenCount,
   getDaemonState,
+  type IntentionItem,
 } from '../storage/AmbientStore.js';
+import { getGoalsWithStatus, computeDailyScorecard } from '../accountability/Scorecard.js';
+import { getSiteTimeBreakdown } from '../browser/ChromeHistory.js';
 import { loadConfig } from '../config/index.js';
 import { DAEMON_PORT } from '../config/paths.js';
 import { createLogger } from '../shared/logger.js';
@@ -41,6 +71,75 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DAILY_TOKEN_BUDGET = 50_000;
 const ASK_MODEL = 'claude-haiku-4-5-20251001';
 const ASK_MAX_TOKENS = 600;
+
+// Directory holding the generated "morning brief" HTML files. Overridable so the
+// standalone product doesn't assume this personal path; the Morning Coffee tab
+// degrades to an empty state when the directory is absent or empty.
+const BRIEFS_DIR =
+  process.env.AMBIENT_BRIEFS_DIR ??
+  path.join(os.homedir(), 'autonomous_vibe_interface/coder1-ide-next/public/morning-briefs');
+
+/** Matches a dated brief file, e.g. "2026-06-23.html". */
+const BRIEF_DATE_RE = /^\d{4}-\d{2}-\d{2}\.html$/;
+
+// Directory holding the morning-brief config files the Settings page edits.
+const BRIEF_CONFIG_DIR =
+  process.env.AMBIENT_BRIEF_CONFIG_DIR ??
+  path.join(os.homedir(), '.claude/skills/morning-brief-steroids');
+
+// Claude Code skills directory — powers the brief's "Skills" catalog page.
+const SKILLS_DIR = process.env.AMBIENT_SKILLS_DIR ?? path.join(os.homedir(), '.claude/skills');
+
+// coder1-ide-next root (cwd for render.js) derived from BRIEFS_DIR (.../public/morning-briefs).
+const IDE_DIR = path.dirname(path.dirname(BRIEFS_DIR));
+
+// The 5 strategic sub-objects shared between command-center.json and brief-data.strategicCommand.
+const COMMAND_CENTER_KEYS = [
+  'heroContent',
+  'shipLane',
+  'goAutomatedPipeline',
+  'fiveHundredClub',
+  'weeklyRhythm',
+] as const;
+
+// Top-level brief zones that can be toggled on/off (default enabled). These map
+// 1:1 to the zone blocks in render.js's buildPage().
+const SECTION_KEYS = [
+  'strategicCommand',
+  'todaysSignal',
+  'overnight',
+  'todaysFocus',
+  'intelligence',
+  'youtube',
+  'closing',
+] as const;
+
+function readJsonFile(file: string): Record<string, unknown> {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(BRIEF_CONFIG_DIR, file), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    return {};
+  }
+}
+
+/** Whitelist of config files the Settings page may write — no arbitrary paths. */
+const WRITABLE_CONFIG_FILES = new Set(['config.json', 'command-center.json']);
+
+function writeConfigFile(file: string, data: Record<string, unknown>): void {
+  if (!WRITABLE_CONFIG_FILES.has(file)) throw new Error(`refusing to write ${file}`);
+  fs.writeFileSync(path.join(BRIEF_CONFIG_DIR, file), JSON.stringify(data, null, 2) + '\n');
+}
+
+/** Today's local date as YYYY-MM-DD. */
+function localToday(): string {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
 
 /**
  * Creates and starts the Express HTTP server for the web dashboard.
@@ -64,6 +163,7 @@ export function createWebServer(_store: Record<string, unknown>): http.Server {
   // JSON API endpoints
   // ------------------------------------------------------------------
 
+  // Legacy flat list (MCP / older callers). The dashboard uses /board below.
   app.get('/api/tasks', (req: Request, res: Response) => {
     const filter = req.query['filter'];
     try {
@@ -80,15 +180,143 @@ export function createWebServer(_store: Record<string, unknown>): http.Server {
     }
   });
 
-  app.post('/api/tasks/:id/done', (req: Request, res: Response) => {
-    const rawId = req.params['id'];
-    const id = parseInt(typeof rawId === 'string' ? rawId : '', 10);
-    if (isNaN(id)) {
+  // One payload for the Tasks hub: inbox + date-grouped sections + done-today.
+  app.get('/api/tasks/board', (_req: Request, res: Response) => {
+    try {
+      const today = localDateString();
+      const open = getOpenTasks(500);
+      const overdue: typeof open = [];
+      const todayTasks: typeof open = [];
+      const upcoming: typeof open = [];
+      const someday: typeof open = [];
+      for (const t of open) {
+        if (!t.due_date) someday.push(t);
+        else if (t.due_date < today) overdue.push(t);
+        else if (t.due_date === today) todayTasks.push(t);
+        else upcoming.push(t);
+      }
+      const suggestions = getSuggestedTasks();
+      const doneToday = getTasksDoneOnDate(today);
+      res.json({
+        suggestions,
+        overdue,
+        today: todayTasks,
+        upcoming,
+        someday,
+        doneToday,
+        counts: {
+          open: open.length,
+          overdue: overdue.length,
+          doneToday: doneToday.length,
+          suggestions: suggestions.length,
+        },
+      });
+    } catch (err) {
+      log.error('GET /api/tasks/board failed', err);
+      res.status(500).json({ error: 'Failed to build task board' });
+    }
+  });
+
+  // Create a manual to-do (never deduped).
+  app.post('/api/tasks', (req: Request, res: Response) => {
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    if (!content) {
+      res.status(400).json({ error: 'content is required' });
+      return;
+    }
+    const due_date =
+      typeof req.body?.due_date === 'string' && req.body.due_date ? req.body.due_date : undefined;
+    const goal_id =
+      typeof req.body?.goal_id === 'string' && req.body.goal_id ? req.body.goal_id : undefined;
+    try {
+      const id = insertManualTask({ content, due_date, goal_id });
+      res.status(201).json({ id });
+    } catch (err) {
+      log.error('POST /api/tasks failed', err);
+      res.status(500).json({ error: 'Failed to create task' });
+    }
+  });
+
+  // Edit a task (content / due date / goal link).
+  app.patch('/api/tasks/:id', (req: Request, res: Response) => {
+    const id = parseTaskId(req);
+    if (id === null) {
+      res.status(400).json({ error: 'invalid task id' });
+      return;
+    }
+    const fields: { content?: string; due_date?: string | null; goal_id?: string | null } = {};
+    if (typeof req.body?.content === 'string') fields.content = req.body.content.trim();
+    if (req.body?.due_date !== undefined) fields.due_date = req.body.due_date || null;
+    if (req.body?.goal_id !== undefined) fields.goal_id = req.body.goal_id || null;
+    try {
+      updateTask(id, fields);
+      res.json({ ok: true });
+    } catch (err) {
+      log.error('PATCH /api/tasks/:id failed', err);
+      res.status(500).json({ error: 'Failed to update task' });
+    }
+  });
+
+  app.delete('/api/tasks/:id', (req: Request, res: Response) => {
+    const id = parseTaskId(req);
+    if (id === null) {
       res.status(400).json({ error: 'invalid task id' });
       return;
     }
     try {
+      deleteTask(id);
+      res.json({ ok: true });
+    } catch (err) {
+      log.error('DELETE /api/tasks/:id failed', err);
+      res.status(500).json({ error: 'Failed to delete task' });
+    }
+  });
+
+  // Shared handler for reopen / accept / dismiss (all take an id → boolean).
+  const taskAction = (
+    req: Request,
+    res: Response,
+    fn: (id: number) => boolean,
+    label: string,
+  ): void => {
+    const id = parseTaskId(req);
+    if (id === null) {
+      res.status(400).json({ error: 'invalid task id' });
+      return;
+    }
+    try {
+      res.json({ ok: fn(id) });
+    } catch (err) {
+      log.error(`POST /api/tasks/:id/${label} failed`, err);
+      res.status(500).json({ error: `Failed to ${label} task` });
+    }
+  };
+  app.post('/api/tasks/:id/reopen', (req, res) => taskAction(req, res, reopenTask, 'reopen'));
+  app.post('/api/tasks/:id/accept', (req, res) => taskAction(req, res, acceptTask, 'accept'));
+  app.post('/api/tasks/:id/dismiss', (req, res) => taskAction(req, res, dismissTask, 'dismiss'));
+
+  // Complete a task — and if it's linked to a goal, log progress on that goal.
+  app.post('/api/tasks/:id/done', (req: Request, res: Response) => {
+    const id = parseTaskId(req);
+    if (id === null) {
+      res.status(400).json({ error: 'invalid task id' });
+      return;
+    }
+    try {
+      const task = getTaskById(id);
       const ok = markTaskDone(id);
+      if (ok && task && task.goal_id) {
+        try {
+          insertGoalProgress({
+            goal_id: task.goal_id,
+            evidence: `Completed: ${task.content}`,
+            confidence: 0.9,
+          });
+          computeDailyScorecard();
+        } catch (e) {
+          log.warn('Goal progress on task-done failed (non-fatal)', { error: String(e) });
+        }
+      }
       res.json({ ok });
     } catch (err) {
       log.error('POST /api/tasks/:id/done failed', err);
@@ -140,6 +368,364 @@ export function createWebServer(_store: Record<string, unknown>): http.Server {
       log.error('GET /api/goals failed', err);
       res.status(500).json({ error: 'Failed to fetch goals' });
     }
+  });
+
+  // Create a goal typed by the user in the dashboard. title is required;
+  // description and target_date (YYYY-MM-DD) are optional.
+  app.post('/api/goals', (req: Request, res: Response) => {
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    if (!title) {
+      res.status(400).json({ error: 'title is required' });
+      return;
+    }
+    const description =
+      typeof req.body?.description === 'string' && req.body.description.trim()
+        ? req.body.description.trim()
+        : undefined;
+    const targetDate =
+      typeof req.body?.target_date === 'string' && req.body.target_date.trim()
+        ? req.body.target_date.trim()
+        : undefined;
+    const tier = req.body?.tier === 1 ? 1 : 2;
+    try {
+      const id = crypto.randomUUID();
+      insertGoal({ id, title, description, target_date: targetDate, tier });
+      res.status(201).json({ id });
+    } catch (err) {
+      log.error('POST /api/goals failed', err);
+      res.status(500).json({ error: 'Failed to create goal' });
+    }
+  });
+
+  // Active goals enriched with on-track/at-risk/stalled status + time-on-goal.
+  app.get('/api/goals/status', (_req: Request, res: Response) => {
+    try {
+      res.json(getGoalsWithStatus());
+    } catch (err) {
+      log.error('GET /api/goals/status failed', err);
+      res.status(500).json({ error: 'Failed to compute goal status' });
+    }
+  });
+
+  // Mark a goal complete (check it off — drops out of the active list).
+  app.post('/api/goals/:id/complete', (req: Request, res: Response) => {
+    const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
+    if (!id) {
+      res.status(400).json({ error: 'goal id required' });
+      return;
+    }
+    try {
+      res.json({ ok: completeGoal(id) });
+    } catch (err) {
+      log.error('POST /api/goals/:id/complete failed', err);
+      res.status(500).json({ error: 'Failed to complete goal' });
+    }
+  });
+
+  // Permanently delete a goal (for ones added by mistake).
+  app.delete('/api/goals/:id', (req: Request, res: Response) => {
+    const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
+    if (!id) {
+      res.status(400).json({ error: 'goal id required' });
+      return;
+    }
+    try {
+      deleteGoal(id);
+      res.json({ ok: true });
+    } catch (err) {
+      log.error('DELETE /api/goals/:id failed', err);
+      res.status(500).json({ error: 'Failed to delete goal' });
+    }
+  });
+
+  // Toggle a goal's tier (1 = priority counted in Focus Score).
+  app.post('/api/goals/:id/tier', (req: Request, res: Response) => {
+    const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
+    const tier = req.body?.tier === 1 ? 1 : 2;
+    if (!id) {
+      res.status(400).json({ error: 'goal id required' });
+      return;
+    }
+    try {
+      setGoalTier(id, tier);
+      res.json({ ok: true, tier });
+    } catch (err) {
+      log.error('POST /api/goals/:id/tier failed', err);
+      res.status(500).json({ error: 'Failed to set tier' });
+    }
+  });
+
+  // Daily intentions (today's top 3). GET ?date=YYYY-MM-DD (default today).
+  app.get('/api/intentions', (req: Request, res: Response) => {
+    const date = typeof req.query['date'] === 'string' ? req.query['date'] : localDateString();
+    try {
+      const items = getDailyIntentions(date);
+      // When nothing is set yet, suggest from yesterday's unfinished intentions
+      // and any at-risk/stalled goals so the morning set isn't a blank page.
+      let suggestions: string[] = [];
+      if (items.length === 0) {
+        const yesterday = localDateString(new Date(Date.now() - 86_400_000));
+        const carryover = getDailyIntentions(yesterday)
+          .filter((it) => !it.done && it.text)
+          .map((it) => it.text);
+        const atRisk = getGoalsWithStatus()
+          .filter((g) => g.health !== 'aligned')
+          .map((g) => g.title);
+        suggestions = [...carryover, ...atRisk]
+          .filter((t, i, arr) => t && arr.indexOf(t) === i)
+          .slice(0, 3);
+      }
+      res.json({ date, items, suggestions });
+    } catch (err) {
+      log.error('GET /api/intentions failed', err);
+      res.status(500).json({ error: 'Failed to read intentions' });
+    }
+  });
+
+  app.post('/api/intentions', (req: Request, res: Response) => {
+    const date =
+      typeof req.body?.date === 'string' && req.body.date ? req.body.date : localDateString();
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const items: IntentionItem[] = rawItems
+      .filter((it: unknown) => it && typeof (it as IntentionItem).text === 'string')
+      .slice(0, 5)
+      .map((it: IntentionItem) => ({
+        text: String(it.text).trim(),
+        goal_id: typeof it.goal_id === 'string' ? it.goal_id : null,
+        done: it.done === true,
+      }))
+      .filter((it: IntentionItem) => it.text);
+    try {
+      setDailyIntentions(date, items);
+      res.json({ ok: true });
+    } catch (err) {
+      log.error('POST /api/intentions failed', err);
+      res.status(500).json({ error: 'Failed to save intentions' });
+    }
+  });
+
+  // This week's focus.
+  app.get('/api/weekly-focus', (_req: Request, res: Response) => {
+    try {
+      res.json(getCurrentWeeklyFocus() ?? { week_start_date: mondayOf(), title: '', notes: '', goal_ids: [] });
+    } catch (err) {
+      log.error('GET /api/weekly-focus failed', err);
+      res.status(500).json({ error: 'Failed to read weekly focus' });
+    }
+  });
+
+  app.post('/api/weekly-focus', (req: Request, res: Response) => {
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
+    const goalIds = Array.isArray(req.body?.goal_ids)
+      ? req.body.goal_ids.filter((g: unknown) => typeof g === 'string')
+      : [];
+    try {
+      setWeeklyFocus(mondayOf(), title, notes, goalIds);
+      res.json({ ok: true });
+    } catch (err) {
+      log.error('POST /api/weekly-focus failed', err);
+      res.status(500).json({ error: 'Failed to save weekly focus' });
+    }
+  });
+
+  // Daily scorecard: today's focus score + recent trend.
+  app.get('/api/scorecard', (req: Request, res: Response) => {
+    const days = parseIntParam(req.query['days'], 7);
+    try {
+      // Recompute today on demand so the dashboard is always current.
+      computeDailyScorecard();
+      res.json({ today: getScorecard(localDateString()), trend: getScorecardTrend(days) });
+    } catch (err) {
+      log.error('GET /api/scorecard failed', err);
+      res.status(500).json({ error: 'Failed to read scorecard' });
+    }
+  });
+
+  app.get('/api/breakdown', (req: Request, res: Response) => {
+    const hoursBack = parseIntParam(req.query['hours'], 24);
+    try {
+      const base = getTimeBreakdown(hoursBack);
+      // Per-site rollup is read live from Chrome's history; it degrades to [] on
+      // any failure so it can never break the activity/app breakdown.
+      const bySite = getSiteTimeBreakdown(hoursBack);
+      res.json({ ...base, bySite });
+    } catch (err) {
+      log.error('GET /api/breakdown failed', err);
+      res.status(500).json({ error: 'Failed to fetch time breakdown' });
+    }
+  });
+
+  // ------------------------------------------------------------------
+  // Morning Coffee (morning brief) — serve the latest generated brief.
+  // ------------------------------------------------------------------
+
+  // Returns the most recent brief's date (YYYY-MM-DD), or null if none.
+  app.get('/api/brief/latest', (_req: Request, res: Response) => {
+    try {
+      const files = fs
+        .readdirSync(BRIEFS_DIR)
+        .filter((f) => BRIEF_DATE_RE.test(f))
+        .sort()
+        .reverse();
+      const latest = files[0];
+      res.json({ date: latest ? latest.replace(/\.html$/, '') : null });
+    } catch {
+      // Directory missing/unreadable → no brief yet (not an error).
+      res.json({ date: null });
+    }
+  });
+
+  // Skills catalog — the brief's Skills page fetches this. Scans each skill's
+  // SKILL.md frontmatter for name/description/tags.
+  app.get('/api/skills-catalog', (_req: Request, res: Response) => {
+    try {
+      const skills: Array<{ name: string; description: string; tags: string[] }> = [];
+      for (const entry of fs.readdirSync(SKILLS_DIR, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        let txt: string;
+        try {
+          txt = fs.readFileSync(path.join(SKILLS_DIR, entry.name, 'SKILL.md'), 'utf8');
+        } catch {
+          continue; // not a skill (no SKILL.md)
+        }
+        let name = entry.name;
+        let description = '';
+        let tags: string[] = [];
+        const fm = txt.match(/^---\n([\s\S]*?)\n---/);
+        if (fm) {
+          const nm = fm[1].match(/^name:\s*(.+)$/m);
+          const dm = fm[1].match(/^description:\s*(.+)$/m);
+          const tm = fm[1].match(/^tags:\s*(.+)$/m);
+          if (nm) name = nm[1].trim().replace(/^["']|["']$/g, '');
+          if (dm) description = dm[1].trim().replace(/^["']|["']$/g, '');
+          if (tm) tags = tm[1].split(',').map((t) => t.trim()).filter(Boolean);
+        }
+        skills.push({ name, description, tags });
+      }
+      skills.sort((a, b) => a.name.localeCompare(b.name));
+      res.json({ skills, count: skills.length, generatedAt: new Date().toISOString() });
+    } catch (err) {
+      log.error('GET /api/skills-catalog failed', err);
+      res.status(500).json({ error: 'Failed to read skills' });
+    }
+  });
+
+  // Serve only the brief HTML files (never brief-data-*.json, which holds
+  // strategic state). The optional :file defaults to the archive index.
+  app.get('/morning-briefs/:file?', (req: Request, res: Response) => {
+    const raw = req.params['file'];
+    const file = typeof raw === 'string' && raw ? raw : 'index.html';
+    if (!/^[A-Za-z0-9_-]+\.html$/.test(file)) {
+      res.status(404).end();
+      return;
+    }
+    const full = path.join(BRIEFS_DIR, file);
+    if (!full.startsWith(BRIEFS_DIR + path.sep)) {
+      res.status(404).end(); // path-traversal guard
+      return;
+    }
+    res.sendFile(full, (err) => {
+      if (err) res.status(404).end();
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // Brief config (Settings page). Edits the morning-brief "profile" — one
+  // profile today; the shape is the seam where a future userId selects a store.
+  // ------------------------------------------------------------------
+
+  app.get('/api/brief-config', (_req: Request, res: Response) => {
+    try {
+      const cfg = readJsonFile('config.json');
+      const cc = readJsonFile('command-center.json');
+      const sections: Record<string, boolean> = {};
+      const savedSections = (cfg['sections'] ?? {}) as Record<string, unknown>;
+      for (const k of SECTION_KEYS) sections[k] = savedSections[k] !== false; // default on
+      const commandCenter: Record<string, unknown> = {};
+      for (const k of COMMAND_CENTER_KEYS) commandCenter[k] = cc[k] ?? {};
+      res.json({
+        commandCenter,
+        youtubers: cfg['youtubers'] ?? [],
+        competitors: cfg['competitors'] ?? {},
+        newsletterDocUrl: cfg['newsletterDocUrl'] ?? '',
+        location: cfg['location'] ?? '',
+        deliveryTime: cfg['deliveryTime'] ?? '',
+        telegramNotifyTime: cfg['telegramNotifyTime'] ?? '',
+        weeklyBudget: cfg['weeklyBudget'] ?? 0,
+        inspirationQuotes: cfg['inspirationQuotes'] ?? [],
+        sections,
+      });
+    } catch (err) {
+      log.error('GET /api/brief-config failed', err);
+      res.status(500).json({ error: 'Failed to read brief config' });
+    }
+  });
+
+  app.post('/api/brief-config', (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    try {
+      // ---- command-center.json: merge the 5 strategic sub-objects ----
+      const cc = readJsonFile('command-center.json');
+      const inCC = (body['commandCenter'] ?? {}) as Record<string, unknown>;
+      for (const k of COMMAND_CENTER_KEYS) {
+        if (inCC[k] && typeof inCC[k] === 'object') cc[k] = inCC[k];
+      }
+      writeConfigFile('command-center.json', cc);
+
+      // ---- config.json: merge editable keys, preserve the rest ----
+      const cfg = readJsonFile('config.json');
+      if (Array.isArray(body['youtubers'])) cfg['youtubers'] = body['youtubers'];
+      if (body['competitors'] && typeof body['competitors'] === 'object') {
+        cfg['competitors'] = body['competitors'];
+      }
+      if (Array.isArray(body['inspirationQuotes'])) cfg['inspirationQuotes'] = body['inspirationQuotes'];
+      if (typeof body['newsletterDocUrl'] === 'string') cfg['newsletterDocUrl'] = body['newsletterDocUrl'];
+      if (typeof body['location'] === 'string') cfg['location'] = body['location'];
+      if (typeof body['deliveryTime'] === 'string') cfg['deliveryTime'] = body['deliveryTime'];
+      if (typeof body['telegramNotifyTime'] === 'string') cfg['telegramNotifyTime'] = body['telegramNotifyTime'];
+      if (typeof body['weeklyBudget'] === 'number') cfg['weeklyBudget'] = body['weeklyBudget'];
+      if (body['sections'] && typeof body['sections'] === 'object') {
+        const inSec = body['sections'] as Record<string, unknown>;
+        const sections: Record<string, boolean> = {};
+        for (const k of SECTION_KEYS) sections[k] = inSec[k] !== false;
+        cfg['sections'] = sections;
+      }
+      writeConfigFile('config.json', cfg);
+
+      res.json({ ok: true });
+    } catch (err) {
+      log.error('POST /api/brief-config failed', err);
+      res.status(500).json({ error: 'Failed to save brief config' });
+    }
+  });
+
+  // Re-render today's brief from existing data after syncing the saved
+  // command-center + section toggles into it (cheap; no MCP re-collect).
+  app.post('/api/brief/rerender', (_req: Request, res: Response) => {
+    const today = localToday();
+    try {
+      const dataPath = path.join(BRIEFS_DIR, `brief-data-${today}.json`);
+      const data = JSON.parse(fs.readFileSync(dataPath, 'utf8')) as Record<string, unknown>;
+      const cc = readJsonFile('command-center.json');
+      const sc: Record<string, unknown> = {};
+      for (const k of COMMAND_CENTER_KEYS) sc[k] = cc[k] ?? {};
+      data['strategicCommand'] = sc;
+      data['sections'] = readJsonFile('config.json')['sections'] ?? {};
+      fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+    } catch (err) {
+      log.error('POST /api/brief/rerender data sync failed', err);
+      res.status(404).json({ error: 'No brief for today to re-render' });
+      return;
+    }
+    execFile('node', ['scripts/morning-brief/render.js', today], { cwd: IDE_DIR }, (err) => {
+      if (err) {
+        log.error('POST /api/brief/rerender render failed', err);
+        res.status(500).json({ error: 'Re-render failed' });
+        return;
+      }
+      res.json({ ok: true, date: today });
+    });
   });
 
   app.get('/api/status', (_req: Request, res: Response) => {
@@ -291,4 +877,11 @@ function parseIntParam(value: unknown, defaultValue: number): number {
   if (typeof value !== 'string') return defaultValue;
   const parsed = parseInt(value, 10);
   return isNaN(parsed) || parsed < 1 ? defaultValue : parsed;
+}
+
+/** Parses a route :id into a positive integer, or null when invalid. */
+function parseTaskId(req: Request): number | null {
+  const raw = req.params['id'];
+  const id = parseInt(typeof raw === 'string' ? raw : '', 10);
+  return isNaN(id) ? null : id;
 }

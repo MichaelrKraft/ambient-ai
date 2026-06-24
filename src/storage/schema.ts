@@ -323,4 +323,66 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status_due ON tasks(status, due_date);
 `,
   },
+  {
+    version: 7,
+    description: 'Goals & Accountability loop: tiers, session→goal link, daily intentions, weekly focus, daily scorecard',
+    sql: `
+-- Tier-1 goals are the ones that count toward the daily Focus Score.
+ALTER TABLE goals ADD COLUMN tier INTEGER NOT NULL DEFAULT 2;
+
+-- The analyzer stamps each activity session with the goal it most advanced
+-- (derived from its existing goalProgress output) so time-per-goal and the
+-- Focus Score are simple SUMs over activity_sessions.
+ALTER TABLE activity_sessions ADD COLUMN aligned_goal_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_activity_aligned_goal ON activity_sessions(aligned_goal_id);
+
+-- daily_intentions: the user's top-3 "what matters today". items is a JSON
+-- array of { text, goal_id?, done }. One row per local date.
+CREATE TABLE IF NOT EXISTS daily_intentions (
+  date        TEXT PRIMARY KEY,
+  items       TEXT NOT NULL DEFAULT '[]',
+  set_at      TEXT,
+  reviewed_at TEXT
+);
+
+-- weekly_focus: one focus statement per week (the mid layer between outcome
+-- goals and daily intentions). goal_ids is a JSON array of linked goal ids.
+CREATE TABLE IF NOT EXISTS weekly_focus (
+  week_start_date TEXT PRIMARY KEY,
+  title           TEXT,
+  notes           TEXT,
+  goal_ids        TEXT NOT NULL DEFAULT '[]',
+  updated_at      TEXT
+);
+
+-- daily_scorecard: the computed accountability snapshot per local date.
+CREATE TABLE IF NOT EXISTS daily_scorecard (
+  date          TEXT PRIMARY KEY,
+  focus_score   REAL NOT NULL DEFAULT 0,
+  tier1_minutes INTEGER NOT NULL DEFAULT 0,
+  total_minutes INTEGER NOT NULL DEFAULT 0,
+  aligned       INTEGER NOT NULL DEFAULT 0,
+  drifting      INTEGER NOT NULL DEFAULT 0,
+  neglected     INTEGER NOT NULL DEFAULT 0,
+  computed_at   TEXT
+);
+`,
+  },
+  {
+    version: 8,
+    description: 'Task hub: manual vs auto source, goal link, and suggestions-inbox accept flag',
+    sql: `
+-- source: 'auto' (extracted from screen activity) | 'manual' (typed by the user).
+ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'auto';
+
+-- goal_id: optional link to a goal. Completing a linked task logs goal_progress.
+ALTER TABLE tasks ADD COLUMN goal_id TEXT;
+
+-- accepted: 0 = sitting in the "Ambient noticed" suggestions inbox awaiting
+-- triage; 1 = a real list task. Existing rows default to 1 (stay in the list);
+-- new AUTO captures are inserted with 0, manual tasks with 1.
+ALTER TABLE tasks ADD COLUMN accepted INTEGER NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS idx_tasks_inbox ON tasks(source, accepted, status);
+`,
+  },
 ];

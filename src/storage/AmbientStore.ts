@@ -30,6 +30,8 @@ export interface ActivitySession {
   /** Deserialised from the TEXT JSON column. */
   apps_seen: string[] | null;
   token_cost: number;
+  /** Goal this session most advanced (set by the analyzer), or null. */
+  aligned_goal_id?: string | null;
 }
 
 export interface NewActivitySession {
@@ -40,6 +42,7 @@ export interface NewActivitySession {
   category?: string;
   apps_seen?: string[];
   token_cost?: number;
+  aligned_goal_id?: string;
 }
 
 export interface KnowledgeItem {
@@ -78,6 +81,8 @@ export interface Goal {
   created_at: string;
   target_date: string | null;
   status: 'active' | 'completed' | 'paused';
+  /** 1 = priority goal counted in the Focus Score; 2 = normal. */
+  tier: number;
 }
 
 export interface NewGoal {
@@ -87,6 +92,7 @@ export interface NewGoal {
   created_at?: string;
   target_date?: string;
   status?: 'active' | 'completed' | 'paused';
+  tier?: number;
 }
 
 export interface GoalProgress {
@@ -133,6 +139,12 @@ export interface Task {
   created_at: string;
   completed_at: string | null;
   is_pii_flagged: boolean;
+  /** 'auto' (screen-extracted) | 'manual' (typed by the user). */
+  source: string;
+  /** Optional link to a goal; completing the task logs progress on it. */
+  goal_id: string | null;
+  /** 0 = suggestions inbox (awaiting triage); 1 = a real list task. */
+  accepted: boolean;
 }
 
 export interface NewTask {
@@ -141,6 +153,10 @@ export interface NewTask {
   due_date?: string;
   confidence?: number;
   is_pii_flagged?: boolean;
+  source?: string;
+  goal_id?: string;
+  /** Defaults to 1 (real task); auto-capture passes 0 to route to the inbox. */
+  accepted?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +172,7 @@ interface RawActivitySession {
   category: string | null;
   apps_seen: string | null;
   token_cost: number;
+  aligned_goal_id: string | null;
 }
 
 interface RawKnowledgeItem {
@@ -185,6 +202,7 @@ interface RawGoal {
   created_at: string;
   target_date: string | null;
   status: string;
+  tier: number;
 }
 
 interface RawNotification {
@@ -206,6 +224,9 @@ interface RawTask {
   created_at: string;
   completed_at: string | null;
   is_pii_flagged: number;
+  source: string;
+  goal_id: string | null;
+  accepted: number;
 }
 
 interface RawDaemonState {
@@ -264,6 +285,7 @@ function deserialiseTask(row: RawTask): Task {
     source_apps: parseJsonArray(row.source_apps),
     status: row.status as TaskStatus,
     is_pii_flagged: row.is_pii_flagged !== 0,
+    accepted: row.accepted !== 0,
   };
 }
 
@@ -302,8 +324,8 @@ export function insertActivitySession(session: NewActivitySession): number {
   const result = db
     .prepare(
       `INSERT INTO activity_sessions
-         (period_start, period_end, primary_app, summary, category, apps_seen, token_cost)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (period_start, period_end, primary_app, summary, category, apps_seen, token_cost, aligned_goal_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       session.period_start,
@@ -313,6 +335,7 @@ export function insertActivitySession(session: NewActivitySession): number {
       session.category ?? null,
       session.apps_seen !== undefined ? JSON.stringify(session.apps_seen) : null,
       session.token_cost ?? 0,
+      session.aligned_goal_id ?? null,
     );
 
   const id = result.lastInsertRowid;
@@ -341,6 +364,80 @@ export function getRecentActivity(
     .all(since, limit) as RawActivitySession[];
 
   return rows.map(deserialiseActivity);
+}
+
+/**
+ * One row of the daily time breakdown: a label (category or app name) and the
+ * total minutes of activity attributed to it within the window.
+ */
+export interface TimeBreakdownRow {
+  label: string;
+  minutes: number;
+}
+
+export interface TimeBreakdown {
+  totalMinutes: number;
+  byCategory: TimeBreakdownRow[];
+  byApp: TimeBreakdownRow[];
+}
+
+interface RawBreakdownRow {
+  label: string | null;
+  minutes: number | null;
+}
+
+/**
+ * Aggregates activity-session durations over the last `hoursBack` hours into a
+ * time breakdown grouped by category ("tasks") and by primary_app ("websites").
+ *
+ * Duration per session = period_end - period_start, summed via julianday()
+ * (which parses the stored ISO timestamps). Rows are returned largest-first.
+ * Screenpipe captures app-level activity only, so the "app" breakdown is the
+ * closest available proxy for time-per-website.
+ */
+export function getTimeBreakdown(hoursBack: number): TimeBreakdown {
+  const db = getDb();
+  const since = hoursAgoISO(hoursBack);
+
+  const durationExpr =
+    `(julianday(period_end) - julianday(period_start)) * 24 * 60`;
+
+  const byCategory = (
+    db
+      .prepare(
+        `SELECT COALESCE(NULLIF(TRIM(category), ''), 'other') AS label,
+                SUM(${durationExpr}) AS minutes
+         FROM activity_sessions
+         WHERE period_start >= ?
+         GROUP BY label
+         ORDER BY minutes DESC`,
+      )
+      .all(since) as RawBreakdownRow[]
+  ).map(normaliseBreakdownRow);
+
+  const byApp = (
+    db
+      .prepare(
+        `SELECT COALESCE(NULLIF(TRIM(primary_app), ''), 'Unknown') AS label,
+                SUM(${durationExpr}) AS minutes
+         FROM activity_sessions
+         WHERE period_start >= ?
+         GROUP BY label
+         ORDER BY minutes DESC`,
+      )
+      .all(since) as RawBreakdownRow[]
+  ).map(normaliseBreakdownRow);
+
+  const totalMinutes = byCategory.reduce((sum, r) => sum + r.minutes, 0);
+
+  return { totalMinutes: Math.round(totalMinutes), byCategory, byApp };
+}
+
+function normaliseBreakdownRow(row: RawBreakdownRow): TimeBreakdownRow {
+  return {
+    label: row.label ?? 'Unknown',
+    minutes: Math.round(row.minutes ?? 0),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -513,8 +610,8 @@ export function insertGoal(goal: NewGoal): void {
   const db = getDb();
   db
     .prepare(
-      `INSERT INTO goals (id, title, description, created_at, target_date, status)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO goals (id, title, description, created_at, target_date, status, tier)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       goal.id,
@@ -523,6 +620,7 @@ export function insertGoal(goal: NewGoal): void {
       goal.created_at ?? nowISO(),
       goal.target_date ?? null,
       goal.status ?? 'active',
+      goal.tier ?? 2,
     );
   log.debug(`Inserted goal id=${goal.id}`);
 }
@@ -587,6 +685,235 @@ export function insertGoalProgress(progress: NewGoalProgress): void {
 }
 
 // ---------------------------------------------------------------------------
+// Goals & Accountability — daily intentions, weekly focus, scorecard
+// ---------------------------------------------------------------------------
+
+export interface IntentionItem {
+  text: string;
+  goal_id?: string | null;
+  done?: boolean;
+}
+
+/** Upserts today's (or any date's) top-3 intentions. */
+export function setDailyIntentions(date: string, items: IntentionItem[]): void {
+  getDb()
+    .prepare(
+      `INSERT INTO daily_intentions (date, items, set_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(date) DO UPDATE SET items = excluded.items, set_at = excluded.set_at`,
+    )
+    .run(date, JSON.stringify(items), nowISO());
+}
+
+export function getDailyIntentions(date: string): IntentionItem[] {
+  const row = getDb()
+    .prepare(`SELECT items FROM daily_intentions WHERE date = ?`)
+    .get(date) as { items: string } | undefined;
+  if (!row) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.items);
+    return Array.isArray(parsed) ? (parsed as IntentionItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setIntentionsReviewed(date: string): void {
+  getDb().prepare(`UPDATE daily_intentions SET reviewed_at = ? WHERE date = ?`).run(nowISO(), date);
+}
+
+export interface WeeklyFocus {
+  week_start_date: string;
+  title: string | null;
+  notes: string | null;
+  goal_ids: string[];
+  updated_at: string | null;
+}
+
+interface RawWeeklyFocus {
+  week_start_date: string;
+  title: string | null;
+  notes: string | null;
+  goal_ids: string | null;
+  updated_at: string | null;
+}
+
+/** Monday (local) of the week containing `date`, as YYYY-MM-DD. */
+export function mondayOf(date: Date = new Date()): string {
+  const d = new Date(date);
+  const offset = (d.getDay() + 6) % 7; // days since Monday (0 = Monday)
+  d.setDate(d.getDate() - offset);
+  return localDateString(d);
+}
+
+export function setWeeklyFocus(
+  weekStart: string,
+  title: string,
+  notes: string,
+  goalIds: string[],
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO weekly_focus (week_start_date, title, notes, goal_ids, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(week_start_date) DO UPDATE SET
+         title = excluded.title, notes = excluded.notes,
+         goal_ids = excluded.goal_ids, updated_at = excluded.updated_at`,
+    )
+    .run(weekStart, title, notes, JSON.stringify(goalIds), nowISO());
+}
+
+/** Returns the focus row for the week containing `date` (Monday-keyed), or null. */
+export function getCurrentWeeklyFocus(date: Date = new Date()): WeeklyFocus | null {
+  const row = getDb()
+    .prepare(`SELECT * FROM weekly_focus WHERE week_start_date = ?`)
+    .get(mondayOf(date)) as RawWeeklyFocus | undefined;
+  if (!row) return null;
+  return { ...row, goal_ids: parseJsonArray(row.goal_ids) ?? [] };
+}
+
+/** Sets a goal's tier (1 = priority counted in the Focus Score). */
+export function setGoalTier(goalId: string, tier: number): void {
+  getDb().prepare(`UPDATE goals SET tier = ? WHERE id = ?`).run(tier, goalId);
+}
+
+/**
+ * Marks a goal completed — it drops out of the active list (getActiveGoals
+ * filters status='active') but the record is kept. Returns true if changed.
+ */
+export function completeGoal(goalId: string): boolean {
+  const r = getDb()
+    .prepare(`UPDATE goals SET status = 'completed' WHERE id = ? AND status = 'active'`)
+    .run(goalId);
+  return r.changes > 0;
+}
+
+/** Permanently deletes a goal and its progress rows (for ones added by mistake). */
+export function deleteGoal(goalId: string): void {
+  const db = getDb();
+  db.prepare(`DELETE FROM goal_progress WHERE goal_id = ?`).run(goalId);
+  db.prepare(`DELETE FROM goals WHERE id = ?`).run(goalId);
+}
+
+export interface GoalTimeProgress {
+  minutes: number;
+  lastEvidenceAt: string | null;
+  lastEvidence: string | null;
+  progressCount: number;
+}
+
+/** Time-on-goal (from aligned sessions) + recent goal_progress, over `days`. */
+export function getGoalTimeAndProgress(goalId: string, days: number = 7): GoalTimeProgress {
+  const db = getDb();
+  const since = hoursAgoISO(days * 24);
+  const dur = `(julianday(period_end) - julianday(period_start)) * 24 * 60`;
+  const t = db
+    .prepare(
+      `SELECT COALESCE(SUM(${dur}),0) AS minutes FROM activity_sessions
+       WHERE aligned_goal_id = ? AND period_start >= ?`,
+    )
+    .get(goalId, since) as { minutes: number };
+  const p = db
+    .prepare(
+      `SELECT timestamp, evidence FROM goal_progress
+       WHERE goal_id = ? AND timestamp >= ? ORDER BY timestamp DESC LIMIT 1`,
+    )
+    .get(goalId, since) as { timestamp: string; evidence: string | null } | undefined;
+  const c = db
+    .prepare(`SELECT COUNT(*) AS n FROM goal_progress WHERE goal_id = ? AND timestamp >= ?`)
+    .get(goalId, since) as { n: number };
+  return {
+    minutes: Math.round(t.minutes || 0),
+    lastEvidenceAt: p?.timestamp ?? null,
+    lastEvidence: p?.evidence ?? null,
+    progressCount: c.n,
+  };
+}
+
+export interface Scorecard {
+  date: string;
+  focus_score: number;
+  tier1_minutes: number;
+  total_minutes: number;
+  aligned: number;
+  drifting: number;
+  neglected: number;
+  computed_at: string | null;
+}
+
+export function upsertDailyScorecard(s: Scorecard): void {
+  getDb()
+    .prepare(
+      `INSERT INTO daily_scorecard
+         (date, focus_score, tier1_minutes, total_minutes, aligned, drifting, neglected, computed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(date) DO UPDATE SET
+         focus_score = excluded.focus_score, tier1_minutes = excluded.tier1_minutes,
+         total_minutes = excluded.total_minutes, aligned = excluded.aligned,
+         drifting = excluded.drifting, neglected = excluded.neglected,
+         computed_at = excluded.computed_at`,
+    )
+    .run(
+      s.date,
+      s.focus_score,
+      s.tier1_minutes,
+      s.total_minutes,
+      s.aligned,
+      s.drifting,
+      s.neglected,
+      s.computed_at ?? nowISO(),
+    );
+}
+
+export function getScorecard(date: string): Scorecard | null {
+  const row = getDb().prepare(`SELECT * FROM daily_scorecard WHERE date = ?`).get(date) as
+    | Scorecard
+    | undefined;
+  return row ?? null;
+}
+
+export function getScorecardTrend(days: number = 7): Scorecard[] {
+  return getDb()
+    .prepare(`SELECT * FROM daily_scorecard ORDER BY date DESC LIMIT ?`)
+    .all(days) as Scorecard[];
+}
+
+/** Tier-1-aligned minutes vs all tracked minutes for a local date. */
+export function getDailyAlignmentMinutes(date: string): { tier1: number; total: number } {
+  const db = getDb();
+  const dur = `(julianday(period_end) - julianday(period_start)) * 24 * 60`;
+  // Sessions are stored in UTC; convert to local before taking the date so
+  // evening work (already "tomorrow" in UTC) counts toward the local day.
+  const total = db
+    .prepare(
+      `SELECT COALESCE(SUM(${dur}),0) AS m FROM activity_sessions
+       WHERE date(period_start, 'localtime') = date(?)`,
+    )
+    .get(date) as { m: number };
+  const tier1 = db
+    .prepare(
+      `SELECT COALESCE(SUM(${dur}),0) AS m FROM activity_sessions a
+       JOIN goals g ON g.id = a.aligned_goal_id AND g.tier = 1
+       WHERE date(a.period_start, 'localtime') = date(?)`,
+    )
+    .get(date) as { m: number };
+  return { tier1: Math.round(tier1.m || 0), total: Math.round(total.m || 0) };
+}
+
+/** Minutes on a specific local date attributed (aligned) to a single goal. */
+export function getGoalAlignedMinutesForDate(goalId: string, date: string): number {
+  const db = getDb();
+  const dur = `(julianday(period_end) - julianday(period_start)) * 24 * 60`;
+  const r = db
+    .prepare(
+      `SELECT COALESCE(SUM(${dur}),0) AS m FROM activity_sessions
+       WHERE aligned_goal_id = ? AND date(period_start, 'localtime') = date(?)`,
+    )
+    .get(goalId, date) as { m: number };
+  return Math.round(r.m || 0);
+}
+
+// ---------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------
 
@@ -638,8 +965,8 @@ export function insertTask(task: NewTask): number | null {
   const result = db
     .prepare(
       `INSERT OR IGNORE INTO tasks
-         (content, content_hash, source_apps, due_date, status, confidence, created_at, is_pii_flagged)
-       VALUES (?, ?, ?, ?, 'open', ?, ?, ?)`,
+         (content, content_hash, source_apps, due_date, status, confidence, created_at, is_pii_flagged, source, goal_id, accepted)
+       VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       task.content,
@@ -649,6 +976,9 @@ export function insertTask(task: NewTask): number | null {
       task.confidence ?? null,
       nowISO(),
       task.is_pii_flagged === true ? 1 : 0,
+      task.source ?? 'auto',
+      task.goal_id ?? null,
+      task.accepted === false ? 0 : 1,
     );
 
   if (result.changes === 0) {
@@ -661,12 +991,47 @@ export function insertTask(task: NewTask): number | null {
   return id;
 }
 
-/** Returns all open tasks, oldest first. */
+/**
+ * Inserts a user-typed to-do. Unlike insertTask (auto-capture), this never
+ * dedups — manual to-dos may legitimately repeat — so it uses a unique
+ * content_hash. source='manual', accepted=1 (a real list task).
+ */
+export function insertManualTask(task: {
+  content: string;
+  due_date?: string;
+  goal_id?: string;
+}): number {
+  const db = getDb();
+  const hash = `manual:${crypto.randomUUID()}`;
+  const result = db
+    .prepare(
+      `INSERT INTO tasks
+         (content, content_hash, source_apps, due_date, status, confidence, created_at, is_pii_flagged, source, goal_id, accepted)
+       VALUES (?, ?, NULL, ?, 'open', NULL, ?, 0, 'manual', ?, 1)`,
+    )
+    .run(task.content, hash, task.due_date ?? null, nowISO(), task.goal_id ?? null);
+  return Number(result.lastInsertRowid);
+}
+
+/** Returns all accepted open list tasks, oldest first (excludes the inbox). */
 export function getOpenTasks(limit: number = 100): Task[] {
   const db = getDb();
   const rows = db
     .prepare(
-      `SELECT * FROM tasks WHERE status = 'open' ORDER BY created_at ASC LIMIT ?`,
+      `SELECT * FROM tasks WHERE status = 'open' AND accepted = 1 ORDER BY created_at ASC LIMIT ?`,
+    )
+    .all(limit) as RawTask[];
+  return rows.map(deserialiseTask);
+}
+
+/** Auto-captured tasks awaiting triage in the "Ambient noticed" inbox. */
+export function getSuggestedTasks(limit: number = 50): Task[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE status = 'open' AND accepted = 0 AND source = 'auto'
+       ORDER BY created_at DESC LIMIT ?`,
     )
     .all(limit) as RawTask[];
   return rows.map(deserialiseTask);
@@ -682,7 +1047,7 @@ export function getOverdueTasks(): Task[] {
   const rows = db
     .prepare(
       `SELECT * FROM tasks
-       WHERE status = 'open' AND due_date IS NOT NULL AND due_date < ?
+       WHERE status = 'open' AND accepted = 1 AND due_date IS NOT NULL AND due_date < ?
        ORDER BY due_date ASC`,
     )
     .all(today) as RawTask[];
@@ -700,7 +1065,7 @@ export function getUpcomingTasks(withinHours: number = 48): Task[] {
   const rows = db
     .prepare(
       `SELECT * FROM tasks
-       WHERE status = 'open' AND due_date IS NOT NULL
+       WHERE status = 'open' AND accepted = 1 AND due_date IS NOT NULL
          AND due_date >= ? AND due_date <= ?
        ORDER BY due_date ASC`,
     )
@@ -733,6 +1098,76 @@ export function markTaskDone(id: number): boolean {
     .run(nowISO(), id);
   log.debug(`markTaskDone id=${id} changed=${result.changes}`);
   return result.changes > 0;
+}
+
+/** Returns a single task by id, or null. */
+export function getTaskById(id: number): Task | null {
+  const row = getDb().prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as RawTask | undefined;
+  return row ? deserialiseTask(row) : null;
+}
+
+/** Re-opens a done/dismissed task (clears completed_at). */
+export function reopenTask(id: number): boolean {
+  const r = getDb()
+    .prepare(`UPDATE tasks SET status = 'open', completed_at = NULL WHERE id = ?`)
+    .run(id);
+  return r.changes > 0;
+}
+
+/** Accepts a suggestion (moves it from the inbox into the real list). */
+export function acceptTask(id: number): boolean {
+  const r = getDb().prepare(`UPDATE tasks SET accepted = 1 WHERE id = ?`).run(id);
+  return r.changes > 0;
+}
+
+/** Dismisses a task (suggestion or otherwise). */
+export function dismissTask(id: number): boolean {
+  const r = getDb().prepare(`UPDATE tasks SET status = 'dismissed' WHERE id = ?`).run(id);
+  return r.changes > 0;
+}
+
+/** Permanently deletes a task. */
+export function deleteTask(id: number): void {
+  getDb().prepare(`DELETE FROM tasks WHERE id = ?`).run(id);
+}
+
+/** Edits a task's content / due date / goal link. Only provided fields change. */
+export function updateTask(
+  id: number,
+  fields: { content?: string; due_date?: string | null; goal_id?: string | null },
+): void {
+  const sets: string[] = [];
+  const vals: Array<string | null> = [];
+  if (fields.content !== undefined) {
+    sets.push('content = ?');
+    vals.push(fields.content);
+  }
+  if (fields.due_date !== undefined) {
+    sets.push('due_date = ?');
+    vals.push(fields.due_date);
+  }
+  if (fields.goal_id !== undefined) {
+    sets.push('goal_id = ?');
+    vals.push(fields.goal_id);
+  }
+  if (sets.length === 0) return;
+  vals.push(String(id));
+  getDb()
+    .prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`)
+    .run(...vals);
+}
+
+/** Tasks completed on a given local date (for the "Done today" section). */
+export function getTasksDoneOnDate(date: string): Task[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE status = 'done' AND completed_at IS NOT NULL
+         AND date(completed_at, 'localtime') = date(?)
+       ORDER BY completed_at DESC`,
+    )
+    .all(date) as RawTask[];
+  return rows.map(deserialiseTask);
 }
 
 /**

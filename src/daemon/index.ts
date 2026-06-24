@@ -29,10 +29,13 @@ import {
   getActiveGoals,
   getDaemonState,
   setDaemonState,
+  setIntentionsReviewed,
+  localDateString,
 } from '../storage/AmbientStore.js';
 import { ScreenpipeClient } from '../screenpipe/ScreenpipeClient.js';
 import type { OcrEntry } from '../screenpipe/types.js';
 import { ActivityAnalyzer } from '../analysis/ActivityAnalyzer.js';
+import { computeDailyScorecard } from '../accountability/Scorecard.js';
 import { ProactiveEngine } from '../notifications/ProactiveEngine.js';
 import { createWebServer } from '../web/server.js';
 import { Scheduler } from './Scheduler.js';
@@ -219,6 +222,14 @@ export class Daemon {
     // Detect browser deep reads and write to vault.
     await this.runBrowserCapture(entries);
 
+    // Recompute today's accountability scorecard from the freshly-stamped
+    // activity (focus score + per-goal status). Cheap, local, never fatal.
+    try {
+      computeDailyScorecard();
+    } catch (err) {
+      this.log.warn('Scorecard computation failed (non-fatal)', err);
+    }
+
     // Check proactive notification triggers after each analysis cycle.
     // Pass the freshly-loaded config so changes via saveConfig take effect
     // next cycle without a daemon restart.
@@ -401,6 +412,17 @@ Return ONLY a JSON array: ["Tag1", "Tag2", "Tag3"]`,
         if (result.success) {
           this.log.info(`Journal exported: ${result.activitiesCount} activities, ${result.knowledgeCount} insights`);
           this.lastJournalDate = todayDate;
+          // Evening review: close out today's intentions and finalize the
+          // scorecard from the full day's activity (local date — matches how
+          // intentions are keyed). Independent of Obsidian; never fatal.
+          try {
+            const localToday = localDateString();
+            setIntentionsReviewed(localToday);
+            computeDailyScorecard(localToday);
+            this.log.info('Evening review complete (intentions closed + scorecard finalized)');
+          } catch (err) {
+            this.log.warn('Evening review failed (non-fatal)', err);
+          }
         } else {
           this.log.warn(`Journal export failed: ${result.error}`);
         }

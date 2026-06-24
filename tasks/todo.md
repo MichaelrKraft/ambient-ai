@@ -1,3 +1,34 @@
+# Ambient Dashboard Enhancements (current task)
+
+Three requested features. All additive, minimal-impact.
+
+## 1. Time breakdown ("Time" tab)
+- [ ] `getTimeBreakdown(hoursBack)` in AmbientStore — sum session durations grouped by category and by primary_app
+- [ ] `GET /api/breakdown?hours=` endpoint in server.ts
+- [ ] "Time" nav tab + section in index.html
+- [ ] `loadBreakdown()` renderer with proportional bars in app.js
+- [ ] bar styles in styles.css
+- Note: Screenpipe stores app-level activity only (no per-URL), so "websites" = grouped by app/browser.
+
+## 2. Global Ask bar (not a tab)
+- [ ] Remove "Ask" nav tab + #ask section from index.html
+- [ ] Add persistent ask bar between nav and main (sticky), collapsible answer panel
+- [ ] Rewire sendAsk() to the global bar; drop ask from the tab router
+- [ ] ask-bar styles
+
+## 3. Goals — type out a goal
+- [x] `POST /api/goals` endpoint (insertGoal + crypto.randomUUID, title required)
+- [x] Add-goal form (title, optional description, optional target date) in goals section
+- [x] Wire form submit → POST → reload goals
+
+## Review (this task)
+- All three done. `tsc --noEmit` exit 0, `npm run build` exit 0, web files copied to dist.
+- Time breakdown SQL validated read-only against real DB: byCategory (coding/browsing/…) and byApp (Claude/Chrome/Terminal/…) return correct minutes.
+- Files: `src/storage/AmbientStore.ts` (getTimeBreakdown), `src/web/server.ts` (GET /api/breakdown, POST /api/goals), `src/web/public/{index.html,app.js,styles.css}`.
+- NOT YET LIVE: launchd daemon (com.coder1.ambient) still runs old dist; needs restart to serve the new dashboard. Awaiting confirmation per safety rule.
+
+---
+
 # Ambient Distribution - Todo List
 
 ## Phase 1: UX Improvements
