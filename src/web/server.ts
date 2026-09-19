@@ -63,6 +63,7 @@ import { getSiteTimeBreakdown } from '../browser/ChromeHistory.js';
 import { loadConfig } from '../config/index.js';
 import { DAEMON_PORT } from '../config/paths.js';
 import { createLogger } from '../shared/logger.js';
+import { registerBriefRoutes } from './briefRoutes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -155,6 +156,10 @@ export function createWebServer(_store: Record<string, unknown>): http.Server {
   // ------------------------------------------------------------------
 
   app.use(express.static(path.join(__dirname, 'public')));
+
+  // Morning-brief write endpoints. Registered BEFORE the global parser below
+  // because they need a larger body limit and their own CORS rules.
+  registerBriefRoutes(app);
 
   // Body parser for POST /ask. Small limit — questions are short.
   app.use(express.json({ limit: '16kb' }));
