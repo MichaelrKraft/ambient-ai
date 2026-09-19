@@ -55,7 +55,10 @@ const REVIEW_KEY_RE = /^[a-z0-9][a-z0-9-]{1,80}$/;
 
 const STATE_FILE = path.join(os.homedir(), '.ambient', 'brief-matrix.json');
 const TODAY_FILE = path.join(os.homedir(), 'Desktop', 'TODAY.md');
-const DEFAULT_REVIEWS_DIR = path.join(os.homedir(), 'Documents', 'Obsidian Notes', 'Output', 'reviews');
+// The vault lives OUTSIDE ~/Documents on purpose: macOS blocks background jobs
+// from reading Documents ("Operation not permitted"), which silently broke every
+// scheduled job that touched the vault.
+const DEFAULT_REVIEWS_DIR = path.join(os.homedir(), 'ObsidianVault', 'Output', 'reviews');
 
 function isQuad(v: unknown): v is Quad {
   return typeof v === 'string' && (QUADS as readonly string[]).includes(v);
