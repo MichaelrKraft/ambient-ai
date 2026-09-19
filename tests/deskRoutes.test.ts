@@ -48,6 +48,23 @@ describe('parseNotes', () => {
     expect(typeof out).toBe('string');
   });
 
+  // Regression: re-stamping a malformed `at` silently rewrote a note's real
+  // creation time to today on every round-trip, so an old thought read as new.
+  it('rejects a malformed timestamp instead of silently re-stamping it', () => {
+    expect(parseNotes({ notes: [{ id: 'n1', text: 'x', at: 'y'.repeat(200) }] }))
+      .toBe('note.at must be a short timestamp string');
+  });
+
+  it('still stamps a note that has never had a time', () => {
+    const out = parseNotes({ notes: [{ id: 'n1', text: 'x' }] });
+    expect((out as { at: string }[])[0].at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('preserves an existing timestamp across a round trip', () => {
+    const out = parseNotes({ notes: [{ id: 'n1', text: 'x', at: '2026-09-01T10:00:00.000Z' }] });
+    expect((out as { at: string }[])[0].at).toBe('2026-09-01T10:00:00.000Z');
+  });
+
   it('rejects more notes than the cap', () => {
     const notes = Array.from({ length: 501 }, (_, i) => ({ id: `n${i}`, text: 'x' }));
     expect(parseNotes({ notes })).toBe('notes is limited to 500 items');
@@ -116,11 +133,15 @@ describe('parseGoals', () => {
     );
   });
 
-  it('caps the achieved list, keeping the most recent', () => {
+  // Regression: the client unshifts new wins onto the FRONT, so slice(-300)
+  // discarded exactly the newest ones and kept the oldest 300 forever.
+  it('caps the achieved list, keeping the NEWEST (the client sends newest first)', () => {
     const achieved = Array.from({ length: 320 }, (_, i) => ({ id: `a${i}`, name: `win ${i}` }));
     const out = parseGoals({ goals: [], achieved });
     const rows = (out as { achieved: { name: string }[] }).achieved;
     expect(rows).toHaveLength(300);
-    expect(rows[rows.length - 1].name).toBe('win 319');
+    expect(rows[0].name).toBe('win 0');        // newest kept
+    expect(rows[299].name).toBe('win 299');
+    expect(rows.some((r) => r.name === 'win 319')).toBe(false); // oldest dropped
   });
 });

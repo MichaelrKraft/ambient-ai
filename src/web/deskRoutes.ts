@@ -99,7 +99,12 @@ export function parseNotes(body: unknown): Note[] | string {
     const text = str(n.text, MAX_NOTE_TEXT);
     if (!id) return 'note.id is required';
     if (!text) return `note.text is required and limited to ${MAX_NOTE_TEXT} characters`;
-    out.push({ id, text, at: str(n.at, MAX_LABEL) ?? new Date().toISOString() });
+    // Only stamp a note that has never had a time. Re-stamping a malformed one
+    // would silently rewrite its real creation time to "today" on every save,
+    // and the panel would then show an old thought as if it were new.
+    const at = str(n.at, MAX_LABEL);
+    if (n.at !== undefined && at === null) return 'note.at must be a short timestamp string';
+    out.push({ id, text, at: at ?? new Date().toISOString() });
   }
   return out;
 }
@@ -133,7 +138,9 @@ export function parseGoals(body: unknown): { goals: Goal[]; achieved: AchievedGo
   const achieved: AchievedGoal[] = [];
   if (raw.achieved !== undefined) {
     if (!Array.isArray(raw.achieved)) return 'achieved must be an array';
-    for (const item of raw.achieved.slice(-MAX_ACHIEVED)) {
+    // The client unshifts new wins onto the FRONT, so the newest are first.
+    // slice(-MAX) would have discarded exactly those and kept the oldest.
+    for (const item of raw.achieved.slice(0, MAX_ACHIEVED)) {
       if (typeof item !== 'object' || item === null) return 'each achieved goal must be an object';
       const a = item as Record<string, unknown>;
       const id = str(a.id, MAX_ID);
