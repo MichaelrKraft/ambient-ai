@@ -123,8 +123,10 @@ export function parseGoals(body: unknown): { goals: Goal[]; achieved: AchievedGo
     const name = str(g.name, MAX_NAME);
     if (!id) return 'goal.id is required';
     if (!name) return `goal.name is required and limited to ${MAX_NAME} characters`;
-    // Progress is whatever Mike typed — Desk has no way to derive it, and a
-    // made-up number would read as fact. Out-of-range clamps rather than fails.
+    // `at`/`pct` are legacy: the panel dropped progress tracking (2026-09-18)
+    // because entering the same fact twice produced goals stuck at 1%, and a
+    // percentage nobody updates is worse than none. Still accepted so a goal
+    // saved by the older build round-trips instead of failing validation.
     const pctRaw = typeof g.pct === 'number' && Number.isFinite(g.pct) ? g.pct : 0;
     goals.push({
       id,
