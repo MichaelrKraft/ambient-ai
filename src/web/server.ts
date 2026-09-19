@@ -64,6 +64,7 @@ import { loadConfig } from '../config/index.js';
 import { DAEMON_PORT } from '../config/paths.js';
 import { createLogger } from '../shared/logger.js';
 import { registerBriefRoutes } from './briefRoutes.js';
+import { registerDeskRoutes } from './deskRoutes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -160,6 +161,11 @@ export function createWebServer(_store: Record<string, unknown>): http.Server {
   // Morning-brief write endpoints. Registered BEFORE the global parser below
   // because they need a larger body limit and their own CORS rules.
   registerBriefRoutes(app);
+
+  // Desk app (~/desk) notes + goals. Same reasoning as briefRoutes: own body
+  // limit and CORS, so it must precede the global parser. Desk's task list is
+  // deliberately NOT here — it shares /api/brief/matrix above.
+  registerDeskRoutes(app);
 
   // Body parser for POST /ask. Small limit — questions are short.
   app.use(express.json({ limit: '16kb' }));
