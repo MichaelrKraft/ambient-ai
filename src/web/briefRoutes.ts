@@ -64,15 +64,51 @@ function isQuad(v: unknown): v is Quad {
   return typeof v === 'string' && (QUADS as readonly string[]).includes(v);
 }
 
-/** Returns a clean state, or a string describing the first problem found. */
-function parseMatrix(body: unknown): MatrixState | string {
+/**
+ * What a POST carries. `base` is the server copy the page last saw — without
+ * it the server cannot tell "Mike deleted this" from "this page never heard of
+ * it", and a page left open for days would erase everything added elsewhere.
+ */
+export interface MatrixSave {
+  tasks: MatrixTask[];
+  dismissed: string[];
+  base: { tasks: MatrixTask[]; dismissed: string[]; updatedAt: string | null };
+}
+
+/** Returns a clean save, or a string describing the first problem found. */
+export function parseMatrix(body: unknown): MatrixSave | string {
   if (typeof body !== 'object' || body === null) return 'body must be a JSON object';
   const raw = body as Record<string, unknown>;
-  if (!Array.isArray(raw.tasks)) return 'tasks is required and must be an array';
-  if (raw.tasks.length > MAX_TASKS) return `tasks is limited to ${MAX_TASKS} items`;
+  const tasks = parseTasks(raw.tasks);
+  if (typeof tasks === 'string') return tasks;
+
+  if (typeof raw.base !== 'object' || raw.base === null) {
+    return 'base is required — this page is out of date, reload it';
+  }
+  const rawBase = raw.base as Record<string, unknown>;
+  const baseTasks = parseTasks(rawBase.tasks);
+  if (typeof baseTasks === 'string') return `base: ${baseTasks}`;
+  if (rawBase.updatedAt !== null && typeof rawBase.updatedAt !== 'string') return 'base.updatedAt must be a string or null';
+
+  return {
+    tasks,
+    dismissed: parseDismissed(raw.dismissed),
+    base: { tasks: baseTasks, dismissed: parseDismissed(rawBase.dismissed), updatedAt: rawBase.updatedAt },
+  };
+}
+
+function parseDismissed(raw: unknown): string[] {
+  return Array.isArray(raw)
+    ? raw.filter((d): d is string => typeof d === 'string' && d.length <= MAX_TEXT).slice(-MAX_DISMISSED)
+    : [];
+}
+
+function parseTasks(raw: unknown): MatrixTask[] | string {
+  if (!Array.isArray(raw)) return 'tasks is required and must be an array';
+  if (raw.length > MAX_TASKS) return `tasks is limited to ${MAX_TASKS} items`;
 
   const tasks: MatrixTask[] = [];
-  for (const item of raw.tasks) {
+  for (const item of raw) {
     if (typeof item !== 'object' || item === null) return 'each task must be an object';
     const t = item as Record<string, unknown>;
     if (typeof t.id !== 'string' || !t.id || t.id.length > 40) return 'task.id is required';
@@ -85,13 +121,47 @@ function parseMatrix(body: unknown): MatrixState | string {
     if (typeof t.finished === 'string' && DATE_RE.test(t.finished)) task.finished = t.finished;
     tasks.push(task);
   }
+  return tasks;
+}
 
-  const dismissed = Array.isArray(raw.dismissed)
-    ? raw.dismissed
-        .filter((d): d is string => typeof d === 'string' && d.length <= MAX_TEXT)
-        .slice(-MAX_DISMISSED)
-    : [];
-  return { tasks, dismissed, updatedAt: new Date().toISOString() };
+const sameTask = (a: MatrixTask, b: MatrixTask): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Three-way merge by task id: start from what the server has now, then apply
+ * only what THIS page changed relative to the copy it started from. A task the
+ * page never touched keeps whatever the other screen did to it; when both
+ * changed the same task, this save wins (it is the most recent intent).
+ */
+export function mergeMatrix(
+  base: MatrixTask[],
+  local: MatrixTask[],
+  current: MatrixTask[],
+  dismissed: { base: string[]; local: string[]; current: string[] } = { base: [], local: [], current: [] },
+): { tasks: MatrixTask[]; dismissed: string[] } {
+  const baseById = new Map(base.map((x) => [x.id, x]));
+  const localIds = new Set(local.map((x) => x.id));
+
+  // Tasks this page deleted: in its base, gone from its list.
+  const deletedHere = new Set(base.filter((x) => !localIds.has(x.id)).map((x) => x.id));
+  const tasks = current.filter((x) => !deletedHere.has(x.id));
+  const index = new Map(tasks.map((x, i) => [x.id, i]));
+
+  for (const mine of local) {
+    const before = baseById.get(mine.id);
+    if (before && sameTask(before, mine)) continue; // untouched here
+    const at = index.get(mine.id);
+    if (at === undefined) { index.set(mine.id, tasks.length); tasks.push(mine); }
+    else tasks[at] = mine;
+  }
+
+  const added = dismissed.local.filter((d) => !dismissed.base.includes(d));
+  const merged = [...new Set([...dismissed.current, ...added])].slice(-MAX_DISMISSED);
+  return { tasks: tasks.slice(0, MAX_TASKS), dismissed: merged };
+}
+
+function readState(): MatrixState | null {
+  if (!fs.existsSync(STATE_FILE)) return null;
+  return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) as MatrixState;
 }
 
 /** The glanceable Desktop file. Plain markdown so Quick Look (space bar) renders it. */
@@ -142,13 +212,13 @@ export function registerBriefRoutes(app: Express, opts: { reviewsDir?: string } 
     next();
   };
 
-  // Own parser with a larger cap than the global 16kb one: 200 tasks of text.
-  app.use('/api/brief', cors, express.json({ limit: '128kb' }));
+  // Own parser with a larger cap than the global 16kb one: 200 tasks of text,
+  // sent twice (the list plus the base copy it was edited from).
+  app.use('/api/brief', cors, express.json({ limit: '256kb' }));
 
   app.get('/api/brief/matrix', (_req: Request, res: Response) => {
     try {
-      if (!fs.existsSync(STATE_FILE)) { res.json({ tasks: [], dismissed: [], updatedAt: null }); return; }
-      res.json(JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')));
+      res.json(readState() ?? { tasks: [], dismissed: [], updatedAt: null });
     } catch (err) {
       log.error('GET /api/brief/matrix failed', err);
       res.status(500).json({ error: 'Saved matrix could not be read' });
@@ -156,14 +226,26 @@ export function registerBriefRoutes(app: Express, opts: { reviewsDir?: string } 
   });
 
   app.post('/api/brief/matrix', (req: Request, res: Response) => {
-    const state = parseMatrix(req.body);
-    if (typeof state === 'string') { res.status(400).json({ error: state }); return; }
+    const save = parseMatrix(req.body);
+    if (typeof save === 'string') { res.status(400).json({ error: save }); return; }
     try {
+      // Desk, the brief and any open tab all write this one file. If another
+      // screen saved since this page last read it, merge instead of overwriting.
+      const current = readState();
+      const changedElsewhere = (current?.updatedAt ?? null) !== save.base.updatedAt;
+      const next = changedElsewhere
+        ? mergeMatrix(save.base.tasks, save.tasks, current?.tasks ?? [], {
+            base: save.base.dismissed, local: save.dismissed, current: current?.dismissed ?? [],
+          })
+        : { tasks: save.tasks, dismissed: save.dismissed };
+      const state: MatrixState = { ...next, updatedAt: new Date().toISOString() };
+
       fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
       writeAtomic(STATE_FILE, JSON.stringify(state, null, 2));
       writeAtomic(TODAY_FILE, renderToday(state));
-      log.info(`matrix saved: ${state.tasks.length} tasks (${state.tasks.filter((t) => t.done).length} done)`);
-      res.json({ ok: true, updatedAt: state.updatedAt, todayFile: '~/Desktop/TODAY.md' });
+      log.info(`matrix saved: ${state.tasks.length} tasks (${state.tasks.filter((t) => t.done).length} done)${changedElsewhere ? ', merged' : ''}`);
+      // The full state goes back so the page can show what was merged in.
+      res.json({ ok: true, ...state, merged: changedElsewhere, todayFile: '~/Desktop/TODAY.md' });
     } catch (err) {
       log.error('POST /api/brief/matrix failed', err);
       res.status(500).json({ error: 'Could not write the matrix or TODAY.md' });
