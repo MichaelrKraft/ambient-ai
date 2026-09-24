@@ -7,7 +7,7 @@
  * from the page. These routes give the page somewhere to save:
  *
  *   GET  /api/brief/matrix   → last saved matrix state (or { tasks: [] })
- *   POST /api/brief/matrix   → persist state + rewrite ~/Desktop/TODAY.md
+ *   POST /api/brief/matrix   → persist state
  *   POST /api/brief/review   → tick Approve/Reject on one item of an
  *                              improve-system review file in the vault
  *
@@ -54,7 +54,6 @@ const REVIEW_FILE_RE = /^\d{4}-\d{2}-\d{2}[\w-]*\.md$/;
 const REVIEW_KEY_RE = /^[a-z0-9][a-z0-9-]{1,80}$/;
 
 const STATE_FILE = path.join(os.homedir(), '.ambient', 'brief-matrix.json');
-const TODAY_FILE = path.join(os.homedir(), 'Desktop', 'TODAY.md');
 // The vault lives OUTSIDE ~/Documents on purpose: macOS blocks background jobs
 // from reading Documents ("Operation not permitted"), which silently broke every
 // scheduled job that touched the vault.
@@ -164,30 +163,6 @@ function readState(): MatrixState | null {
   return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) as MatrixState;
 }
 
-/** The glanceable Desktop file. Plain markdown so Quick Look (space bar) renders it. */
-function renderToday(state: MatrixState): string {
-  const heading = new Date().toLocaleDateString('en-US', {
-    weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/Denver',
-  });
-  const section = (title: string, hint: string, quad: Quad): string => {
-    const rows = state.tasks.filter((t) => t.quad === quad);
-    const lines = rows.length
-      ? rows.map((t) => `- [${t.done ? 'x' : ' '}] ${t.text.replace(/\s+/g, ' ')}`)
-      : ['- (nothing here)'];
-    return `## ${title}\n_${hint}_\n\n${lines.join('\n')}\n`;
-  };
-  return [
-    `# Today — ${heading}`,
-    '',
-    section('Do', 'Important and urgent. Before email.', 'do'),
-    section('Schedule', 'Important, not urgent. Give it a calendar block.', 'schedule'),
-    section('Delegate', 'Urgent, not important. Hand it to an agent.', 'delegate'),
-    section('Done', 'Finished.', 'done'),
-    `_Written by the morning brief's matrix at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Denver' })}. Edit tasks in the brief, not here — this file is overwritten on every change._`,
-    '',
-  ].join('\n');
-}
-
 /** Write via a temp file + rename so a reader never sees a half-written file. */
 function writeAtomic(file: string, content: string): void {
   const tmp = `${file}.tmp-${process.pid}`;
@@ -242,13 +217,12 @@ export function registerBriefRoutes(app: Express, opts: { reviewsDir?: string } 
 
       fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
       writeAtomic(STATE_FILE, JSON.stringify(state, null, 2));
-      writeAtomic(TODAY_FILE, renderToday(state));
       log.info(`matrix saved: ${state.tasks.length} tasks (${state.tasks.filter((t) => t.done).length} done)${changedElsewhere ? ', merged' : ''}`);
       // The full state goes back so the page can show what was merged in.
-      res.json({ ok: true, ...state, merged: changedElsewhere, todayFile: '~/Desktop/TODAY.md' });
+      res.json({ ok: true, ...state, merged: changedElsewhere });
     } catch (err) {
       log.error('POST /api/brief/matrix failed', err);
-      res.status(500).json({ error: 'Could not write the matrix or TODAY.md' });
+      res.status(500).json({ error: 'Could not write the matrix' });
     }
   });
 
