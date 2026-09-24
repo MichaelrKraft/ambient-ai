@@ -344,6 +344,22 @@ export function insertActivitySession(session: NewActivitySession): number {
 }
 
 /**
+ * Stretches the most recent activity session to `periodEnd`, used when a cycle
+ * reuses the last summary instead of calling Haiku. Only touches it if it ended
+ * at or after `notBefore`, so a stale session is never stretched across a gap.
+ * Returns true if a session was extended.
+ */
+export function extendLatestActivitySession(periodEnd: string, notBefore: string): boolean {
+  const result = getDb()
+    .prepare(
+      `UPDATE activity_sessions SET period_end = ?
+       WHERE id = (SELECT MAX(id) FROM activity_sessions) AND period_end >= ?`,
+    )
+    .run(periodEnd, notBefore);
+  return result.changes > 0;
+}
+
+/**
  * Returns activity sessions that started within the last `hoursBack` hours,
  * most recent first. Defaults to 100 rows if limit is not specified.
  */

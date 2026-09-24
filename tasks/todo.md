@@ -166,3 +166,16 @@ PRIVACY.md only lists the first.
 - Dashboard count (step 4) NOT done — server.ts has uncommitted work; counts are in daemon_state `privacy_gate_counts:<date>` ready to read.
 - Also fixed (live checkout, uncommitted): `/api/tasks/triage` ran headless Claude with the user's full permissions on OCR-derived task text. Now `--tools "" --strict-mcp-config --permission-mode dontAsk` + untrusted-data wrapper; injection test did nothing.
 - NOT LIVE: needs (1) Mike's OpenRouter key in Keychain, (2) the live checkout's uncommitted work committed, then merge `feat/privacy-gate`, build, restart `com.coder1.ambient`.
+
+---
+
+# Skip Haiku on unchanged screens (2026-09-24)
+
+Goal: stop paying Haiku to re-summarize the same doc/video every 7 minutes.
+
+- [ ] `src/analysis/ChangeDetector.ts`: pure "same as last cycle?" check — same set of app+window pairs AND normalized word overlap >= 0.8 (digits stripped so clocks/video timers don't count as change). In-memory only; restart = run normally.
+- [ ] Backstop: after 3 consecutive skips (~28 min), force a real Haiku call.
+- [ ] Fail open: any error in the check = run normally.
+- [ ] On skip, extend the latest activity session's `period_end` so time tracking loses nothing; still run scorecard + proactive; skip privacy gate, Haiku, LeadSpot hook, browser capture (screen unchanged).
+- [ ] Log skip counts only (no text), keep a per-day `haiku_skips:<date>` tally to measure the saving.
+- [ ] Tests for detector + session extend; tsc + vitest; build; restart daemon (ask first).

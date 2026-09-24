@@ -27,6 +27,7 @@ import { nowISO, minutesAgoISO } from '../shared/time.js';
 import { getDb, closeDb } from '../storage/db.js';
 import {
   getActiveGoals,
+  extendLatestActivitySession,
   getDaemonState,
   setDaemonState,
   setIntentionsReviewed,
@@ -36,6 +37,7 @@ import { ScreenpipeClient } from '../screenpipe/ScreenpipeClient.js';
 import type { OcrEntry } from '../screenpipe/types.js';
 import { ActivityAnalyzer } from '../analysis/ActivityAnalyzer.js';
 import { PrivacyGate, type GateResult } from '../analysis/PrivacyGate.js';
+import { ChangeDetector } from '../analysis/ChangeDetector.js';
 import { computeDailyScorecard } from '../accountability/Scorecard.js';
 import { ProactiveEngine } from '../notifications/ProactiveEngine.js';
 import { createWebServer } from '../web/server.js';
@@ -60,6 +62,7 @@ export class Daemon {
   private screenpipeClient: ScreenpipeClient | null = null;
   private analyzer: ActivityAnalyzer | null = null;
   private privacyGate: PrivacyGate | null = null;
+  private readonly changeDetector = new ChangeDetector();
   private proactive: ProactiveEngine | null = null;
   private leadspot: LeadSpotIntegration | null = null;
   private readonly log = createLogger('daemon');
@@ -207,6 +210,42 @@ export class Daemon {
     // Activity detected — reset idle timer
     this.lastActivityTime = new Date();
 
+    if (this.reuseLastSummary(entries, since)) {
+      this.log.info(`Got ${entries.length} OCR entries — screens unchanged, reusing last summary`);
+    } else {
+      await this.analyzeEntries(entries, since);
+    }
+
+    // Recompute today's accountability scorecard from the freshly-stamped
+    // activity (focus score + per-goal status). Cheap, local, never fatal.
+    try {
+      computeDailyScorecard();
+    } catch (err) {
+      this.log.warn('Scorecard computation failed (non-fatal)', err);
+    }
+
+    // Check proactive notification triggers after each analysis cycle.
+    // Pass the freshly-loaded config so changes via saveConfig take effect
+    // next cycle without a daemon restart.
+    if (this.proactive) {
+      try {
+        await this.proactive.checkAndNotify(config);
+      } catch (err) {
+        this.log.warn('Proactive check failed (non-fatal)', err);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Browser deep read capture
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The Claude path for one cycle: privacy gate, Haiku analysis, LeadSpot
+   * hook, browser capture.
+   */
+  private async analyzeEntries(entries: OcrEntry[], since: string): Promise<void> {
+    if (this.analyzer === null) return;
     this.log.info(`Got ${entries.length} OCR entries — running Claude analysis`);
 
     // Privacy gate: private screens become placeholders before anything leaves
@@ -249,30 +288,38 @@ export class Daemon {
 
     // Detect browser deep reads and write to vault.
     await this.runBrowserCapture(forCapture);
+  }
 
-    // Recompute today's accountability scorecard from the freshly-stamped
-    // activity (focus score + per-goal status). Cheap, local, never fatal.
+  /**
+   * True when the screens match the last analyzed cycle and the latest
+   * activity session was stretched to cover this one, so Haiku can be skipped.
+   * Any failure returns false: the cycle runs normally (fail open).
+   */
+  private reuseLastSummary(entries: OcrEntry[], since: string): boolean {
     try {
-      computeDailyScorecard();
-    } catch (err) {
-      this.log.warn('Scorecard computation failed (non-fatal)', err);
-    }
-
-    // Check proactive notification triggers after each analysis cycle.
-    // Pass the freshly-loaded config so changes via saveConfig take effect
-    // next cycle without a daemon restart.
-    if (this.proactive) {
-      try {
-        await this.proactive.checkAndNotify(config);
-      } catch (err) {
-        this.log.warn('Proactive check failed (non-fatal)', err);
+      if (!this.changeDetector.shouldSkip(entries)) return false;
+      // Only stretch a session that ended near this cycle's start; otherwise
+      // there is a gap (sleep, pause, restart) and a fresh summary is needed.
+      const notBefore = new Date(new Date(since).getTime() - 60_000).toISOString();
+      if (!extendLatestActivitySession(nowISO(), notBefore)) {
+        this.changeDetector.reset();
+        return false;
       }
+      this.recordHaikuSkip();
+      return true;
+    } catch (err) {
+      this.log.warn('Change check failed — running analysis normally', { error: String(err) });
+      this.changeDetector.reset();
+      return false;
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Browser deep read capture
-  // ---------------------------------------------------------------------------
+  /** Per-day count of skipped Haiku calls, to measure the saving. Counts only. */
+  private recordHaikuSkip(): void {
+    const key = 'haiku_skips:' + localDateString();
+    const prev = Number(getDaemonState(key) ?? '0');
+    setDaemonState(key, String((Number.isFinite(prev) ? prev : 0) + 1));
+  }
 
   /**
    * Logs gate counts (never text or window titles) and keeps a per-day tally in
