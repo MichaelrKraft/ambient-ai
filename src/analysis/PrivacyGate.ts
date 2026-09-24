@@ -15,6 +15,11 @@
  *
  * Question wording and threshold come from a hand-labeled test on 30 real
  * frames (2026-09-24): at 0.4, 6/6 private screens caught, ~5/24 false alarms.
+ * Reworded the same day after the first live afternoon withheld 124/180
+ * screens: `financial` and `never_record` fired on Mike's own coding sessions
+ * and AI cost reports. The new "does NOT count" lists cut terminal false alarms
+ * 41 -> 27 of 57 with 6/6 private screens still caught. Done Deal deal pages
+ * (real buyer/seller names, addresses, contracts) are still withheld on purpose.
  */
 
 import { createHash } from 'crypto';
@@ -38,22 +43,22 @@ const QUESTIONS = {
   personal_info: {
     type: 'noul',
     instructions:
-      "Does the text show private details about a specific private individual: their home address, personal phone number, date of birth, ID number, a child's name, a family matter, or any health condition or medication? Sender names in a list of newsletters or marketing emails, public figures, and authors of articles do NOT count.",
+      "Does the text show private details about a specific private individual: their home address, personal phone number, date of birth, ID number, a child's name, a family matter, or any health condition or medication? Sender names in a list of newsletters or marketing emails, public figures, authors of articles, and names that appear in software code, terminal output, commit messages or developer notes do NOT count.",
   },
   financial: {
     type: 'noul',
     instructions:
-      'Does the text show private money details: a bank or card account, a balance, an invoice, a payment, or confidential business financial figures?',
+      "Does the text show someone's private money details: a bank or card account number, an account balance, a bank or card statement, an invoice or bill addressed to a person or company, or a payment to or from a person? Software cost reports, API or cloud usage costs, product prices, pricing pages, and dollar figures in code, logs or developer notes do NOT count.",
   },
   credential: {
     type: 'noul',
     instructions:
-      "Does the text contain an actual secret value such as a password, API key, access token, or private key? The word 'password' or a masked value does not count.",
+      "Does the text contain an actual secret value such as a password, API key, access token, or private key? The word 'password', a variable or key name without its value, or a masked value does not count.",
   },
   never_record: {
     type: 'noul',
     instructions:
-      "Is the main content of this screen private: banking, a password manager, a medical portal, a private one-to-one message, a confidential client document or contract, or a list of many people's contact details? A newsletter inbox, a news article, a web search, a video, or someone's own coding session does NOT count.",
+      "Is the main content of this screen private: banking, a password manager, a medical portal, a private one-to-one message, a confidential client document or contract, or a list of many people's contact details? A newsletter inbox, a news article, a web search, a video, a code editor, a terminal, or a conversation with an AI coding assistant does NOT count.",
   },
 } as const;
 
