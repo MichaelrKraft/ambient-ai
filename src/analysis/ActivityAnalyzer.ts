@@ -23,7 +23,10 @@ const MODEL = 'claude-haiku-4-5-20251001';
 // without risking truncated JSON, which would fail JSON.parse and drop the
 // entire cycle's activity/knowledge/errors to the fallback path.
 const MAX_TOKENS = 1280;
-const DAILY_TOKEN_BUDGET = 50_000;
+// Raised from 50k → 200k on 2026-08-07: at a 7-min poll cadence, 50k only
+// covered ~4.5 hours before going silent for the rest of the day. 200k
+// covers a 7am-midnight window (~146 cycles) at roughly $1-1.50/day on Haiku.
+const DAILY_TOKEN_BUDGET = 200_000;
 
 /** Max tasks extracted per cycle — keeps output well under MAX_TOKENS. */
 const MAX_TASKS_PER_CYCLE = 2;
@@ -202,7 +205,7 @@ GUIDELINES:
 - knowledge: only include genuinely useful items (decisions made, bugs fixed, patterns discovered). Max 3 items.
 - errors: only include actual errors (TypeErrors, build failures, 404s, etc.), not warnings or lint suggestions. Max 3 items.
 - goalProgress: only include if there is clear evidence. confidence=0.0 if unsure, skip the item entirely.
-- tasks: only include clear commitments/action items ("I'll send the deck Friday", "follow up with Sarah", a Slack ask directed at the user). Max ${MAX_TASKS_PER_CYCLE}. Skip vague intentions. Resolve any relative deadline ("Friday", "tomorrow", "EOD", "next week") to an absolute local date in dueDate using TODAY above; use null if no deadline is stated. Phrase content as a short imperative ("Send the deck to the client").
+- tasks: only include a task if the user EXPLICITLY typed or was explicitly asked to do it in the visible text — a sentence someone actually wrote, not something you infer they probably need to do. Good: "I'll send the deck Friday" (typed by the user), "can you follow up with Sarah?" (a Slack/email message directed at the user). Bad: inferring a task from merely reading docs, browsing a page, or researching a topic — that is not a commitment. When in doubt, do not include it — a missed task is far better than a false one. Max ${MAX_TASKS_PER_CYCLE}. Set confidence to 0.9+ only when the exact commitment text is visible on screen; use confidence below 0.7 for anything inferred or paraphrased, and prefer omitting those. Resolve any relative deadline ("Friday", "tomorrow", "EOD", "next week") to an absolute local date in dueDate using TODAY above; use null if no deadline is stated. Phrase content as a short imperative ("Send the deck to the client").
 - summary: be specific. "Debugging a React useState hook issue in the checkout flow" is better than "coding".`;
 }
 
@@ -239,9 +242,19 @@ export class ActivityAnalyzer {
     const dailyTokens = store.getDailyTokenCount();
     if (dailyTokens > DAILY_TOKEN_BUDGET) {
       this.log.warn(
-        `Daily token budget exceeded (50k). Skipping analysis until tomorrow.`,
+        `Daily token budget exceeded (${DAILY_TOKEN_BUDGET.toLocaleString()}). Skipping analysis until tomorrow.`,
         { dailyTokens },
       );
+      return buildFallback(entries);
+    }
+
+    // Guard: working hours (7 AM - midnight local time).
+    const now = new Date();
+    const hour = now.getHours();
+    if (hour < 7 || hour >= 24) {
+      this.log.info('Outside working hours (7 AM - midnight). Skipping analysis.', {
+        currentHour: hour,
+      });
       return buildFallback(entries);
     }
 

@@ -12,8 +12,8 @@
 // State
 // ------------------------------------------------------------------
 
-/** Currently visible tab name. Morning Coffee (the brief) is the home page. */
-let activeTab = 'morning-coffee';
+/** Currently visible tab name. Leverage is the home page. */
+let activeTab = 'leverage';
 
 /** Per-tab auto-refresh interval IDs. Only activity + errors auto-refresh. */
 const refreshIntervals = {
@@ -296,26 +296,20 @@ function formatMinutes(mins) {
 // ------------------------------------------------------------------
 
 async function loadKnowledge() {
-  const searchInput = document.getElementById('knowledge-search');
-  const query = searchInput ? searchInput.value.trim() : '';
   const container = document.getElementById('knowledge-list');
   if (!container) return;
 
-  const url = query
-    ? `/api/knowledge?q=${encodeURIComponent(query)}&limit=20`
-    : '/api/knowledge?limit=20';
-
   try {
-    const res = await fetch(url);
+    const res = await fetch('/api/knowledge/patterns');
     if (!res.ok) {
-      container.innerHTML = renderError('Failed to load knowledge items.');
+      container.innerHTML = renderError('Failed to load patterns.');
       return;
     }
     const items = await res.json();
 
     if (!Array.isArray(items) || items.length === 0) {
       container.innerHTML =
-        '<div class="empty-state">No knowledge items found.</div>';
+        '<div class="empty-state">No patterns detected in the last 2 hours.</div>';
       return;
     }
 
@@ -728,7 +722,7 @@ function renderTaskBoard(d) {
   let html = '';
   if (d.suggestions && d.suggestions.length) {
     html +=
-      `<div class="task-section task-inbox"><h3 class="task-section-h">🔎 Ambient noticed <span class="task-count">${d.suggestions.length}</span></h3>` +
+      `<div class="task-section task-inbox"><h3 class="task-section-h">Ambient noticed <span class="task-count">${d.suggestions.length}</span></h3>` +
       d.suggestions.map(renderSuggestionRow).join('') +
       '</div>';
   }
@@ -745,7 +739,7 @@ function renderTaskBoard(d) {
   const openCount =
     (d.overdue || []).length + (d.today || []).length + (d.upcoming || []).length + (d.someday || []).length;
   if (openCount === 0 && (!d.suggestions || !d.suggestions.length)) {
-    html += '<div class="empty-state">Nothing on your plate. Nice. ✨</div>';
+    html += '<div class="empty-state">Nothing on your plate.</div>';
   }
   board.innerHTML = html;
   wireTaskBoard(board);
@@ -763,7 +757,7 @@ function renderTaskSection(label, items, key) {
 function taskChips(t) {
   const due = t.due_date ? `<span class="task-chip">${escapeHtml(formatDate(t.due_date))}</span>` : '';
   const goalTitle = t.goal_id ? goalTitleFor(t.goal_id) : null;
-  const goalChip = goalTitle ? `<span class="task-chip goal">🎯 ${escapeHtml(goalTitle)}</span>` : '';
+  const goalChip = goalTitle ? `<span class="task-chip goal">${escapeHtml(goalTitle)}</span>` : '';
   return due + goalChip;
 }
 
@@ -939,6 +933,71 @@ async function addTask(event) {
     loadTasks();
   } catch {
     /* ignore */
+  }
+}
+
+// Runs the triage-tasks skill via headless Claude Code (server-side shell-out)
+// and renders its plain-text report. Can take up to ~2 min — it's a real
+// LLM call reasoning over every open task, not a cached lookup.
+async function runTaskTriage() {
+  const btn = document.getElementById('task-triage-btn');
+  const status = document.getElementById('task-triage-status');
+  const report = document.getElementById('task-triage-report');
+  if (!btn) return;
+  btn.disabled = true;
+  if (status) status.textContent = 'Asking Claude… this can take a minute.';
+  if (report) report.hidden = true;
+  try {
+    const res = await fetch('/api/tasks/triage', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Triage failed');
+    if (report) {
+      report.textContent = data.report || 'No response.';
+      report.hidden = false;
+    }
+    if (status) status.textContent = '';
+  } catch (err) {
+    if (status) status.textContent = err.message || 'Triage failed.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ------------------------------------------------------------------
+// Ideas tab — quick-capture straight to the Obsidian vault inbox
+// ------------------------------------------------------------------
+
+let ideaToastTimer = null;
+
+function showIdeaToast(msg) {
+  const el = document.getElementById('idea-toast');
+  if (!el) return;
+  el.innerHTML = `<span>${escapeHtml(msg)}</span>`;
+  el.hidden = false;
+  if (ideaToastTimer) clearTimeout(ideaToastTimer);
+  ideaToastTimer = setTimeout(() => {
+    el.hidden = true;
+  }, 4000);
+}
+
+async function addIdea(event) {
+  if (event) event.preventDefault();
+  const input = document.getElementById('idea-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  try {
+    const res = await fetch('/api/ideas', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) throw new Error('save failed');
+    input.value = '';
+    input.focus();
+    showIdeaToast('Saved to your vault.');
+  } catch {
+    showIdeaToast('Failed to save — try again.');
   }
 }
 
@@ -1279,6 +1338,10 @@ async function applySettings() {
 
 function loadTabData(tab) {
   switch (tab) {
+    case 'leverage':
+      // Rendered by leverage.js (loaded after this file).
+      if (typeof loadLeverage === 'function') loadLeverage();
+      break;
     case 'morning-coffee':
       loadMorningCoffee();
       break;
@@ -1303,6 +1366,9 @@ function loadTabData(tab) {
     case 'goals':
       loadGoals();
       break;
+    case 'ideas':
+      // No fetch needed — the tab is a write-only capture form.
+      break;
     default:
       break;
   }
@@ -1318,20 +1384,22 @@ if (activityHoursSelect) {
   activityHoursSelect.addEventListener('change', loadActivity);
 }
 
-// Knowledge search with 300 ms debounce
-let searchTimeout = null;
-const knowledgeSearch = document.getElementById('knowledge-search');
-if (knowledgeSearch) {
-  knowledgeSearch.addEventListener('input', () => {
-    clearTimeout(searchTimeout);
-    searchTimeout = setTimeout(loadKnowledge, 300);
-  });
-}
-
 // Tasks quick-add form
 const taskAddForm = document.getElementById('task-add');
 if (taskAddForm) {
   taskAddForm.addEventListener('submit', addTask);
+}
+
+// Ideas quick-capture form
+const ideaAddForm = document.getElementById('idea-add');
+if (ideaAddForm) {
+  ideaAddForm.addEventListener('submit', addIdea);
+}
+
+// Task triage — "Ask Claude what it can help with" (Tasks tab)
+const taskTriageBtn = document.getElementById('task-triage-btn');
+if (taskTriageBtn) {
+  taskTriageBtn.addEventListener('click', runTaskTriage);
 }
 
 // Time breakdown hours selector
@@ -1440,6 +1508,128 @@ if (settingsGear && settingsMenu) {
       }
     });
   });
+}
+
+// Skills dropdown (top-right). Lists every ~/.claude/skills entry with a
+// custom hover tooltip (fixed-position, escapes the scrolling list) showing
+// its description. Native `title` attrs are unreliable inside a scrolling
+// container — the browser tooltip can clip or lag behind fast hover/scroll.
+const skillsGear = document.getElementById('skills-gear');
+const skillsDropdown = document.getElementById('skills-dropdown');
+const skillsFilter = document.getElementById('skills-filter');
+let skillsCache = null;
+let skillTooltipEl = null;
+
+function closeSkillsMenu() {
+  if (!skillsDropdown || !skillsGear) return;
+  skillsDropdown.hidden = true;
+  skillsGear.setAttribute('aria-expanded', 'false');
+  hideSkillTooltip();
+}
+
+function showSkillTooltip(itemEl) {
+  if (!skillTooltipEl) {
+    skillTooltipEl = document.createElement('div');
+    skillTooltipEl.className = 'skill-tooltip';
+    document.body.appendChild(skillTooltipEl);
+  }
+  skillTooltipEl.textContent = itemEl.dataset.desc || 'No description available.';
+  skillTooltipEl.hidden = false;
+  const rect = itemEl.getBoundingClientRect();
+  const tipRect = skillTooltipEl.getBoundingClientRect();
+  let left = rect.left - tipRect.width - 10;
+  if (left < 8) left = rect.right + 10; // flip to the right if off-screen
+  let top = rect.top;
+  if (top + tipRect.height > window.innerHeight - 8) {
+    top = window.innerHeight - tipRect.height - 8;
+  }
+  skillTooltipEl.style.left = `${Math.max(8, left)}px`;
+  skillTooltipEl.style.top = `${Math.max(8, top)}px`;
+}
+
+function hideSkillTooltip() {
+  if (skillTooltipEl) skillTooltipEl.hidden = true;
+}
+
+function renderSkillsList(skills) {
+  const list = document.getElementById('skills-dropdown-list');
+  if (!list) return;
+  if (!skills.length) {
+    list.textContent = 'No skills found.';
+    return;
+  }
+  list.innerHTML = skills
+    .map(
+      (s) =>
+        `<div class="skill-item" data-desc="${escapeHtml(s.description || 'No description available.')}">${escapeHtml(s.name)}</div>`,
+    )
+    .join('');
+}
+
+async function loadSkillsCatalog() {
+  const list = document.getElementById('skills-dropdown-list');
+  try {
+    const res = await fetch('/api/skills-catalog');
+    const data = await res.json();
+    skillsCache = Array.isArray(data.skills) ? data.skills : [];
+    renderSkillsList(skillsCache);
+  } catch {
+    if (list) list.textContent = 'Failed to load skills.';
+  }
+}
+
+if (skillsGear && skillsDropdown) {
+  skillsGear.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const willOpen = skillsDropdown.hidden;
+    skillsDropdown.hidden = !willOpen;
+    skillsGear.setAttribute('aria-expanded', String(willOpen));
+    if (willOpen && skillsCache === null) loadSkillsCatalog();
+    if (willOpen && skillsFilter) skillsFilter.focus();
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!skillsDropdown.hidden && !(e.target.closest && e.target.closest('#skills-menu-wrap'))) {
+      closeSkillsMenu();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeSkillsMenu();
+  });
+}
+
+if (skillsFilter) {
+  skillsFilter.addEventListener('input', () => {
+    if (!skillsCache) return;
+    const q = skillsFilter.value.trim().toLowerCase();
+    const filtered = q ? skillsCache.filter((s) => s.name.toLowerCase().includes(q)) : skillsCache;
+    renderSkillsList(filtered);
+    hideSkillTooltip();
+  });
+}
+
+// Tooltip hover — delegated so it works for re-rendered (filtered) rows too.
+const skillsDropdownList = document.getElementById('skills-dropdown-list');
+if (skillsDropdownList) {
+  skillsDropdownList.addEventListener(
+    'mouseover',
+    (e) => {
+      const item = e.target.closest && e.target.closest('.skill-item');
+      if (item) showSkillTooltip(item);
+    },
+    true,
+  );
+  skillsDropdownList.addEventListener(
+    'mouseout',
+    (e) => {
+      const item = e.target.closest && e.target.closest('.skill-item');
+      if (item) hideSkillTooltip();
+    },
+    true,
+  );
+  // Reposition would be needed on scroll, but hiding is simpler and avoids
+  // a tooltip drifting away from its row mid-scroll.
+  skillsDropdownList.addEventListener('scroll', hideSkillTooltip);
 }
 
 // Ask: button click + Enter key + clear (global bar, present on every tab)
@@ -1567,13 +1757,9 @@ function renderError(message) {
 // Boot sequence
 // ------------------------------------------------------------------
 
-// Load initial data — Morning Coffee is the default home page.
+// Load initial data — the Leverage view is the default home page and boots
+// itself from leverage.js; the Ask bar stays visible there.
 loadStatus();
-loadMorningCoffee();
-
-// The Ask bar is hidden on the default (Morning Coffee) page; it shows on others.
-const initialAskBar = document.getElementById('ask-bar');
-if (initialAskBar) initialAskBar.hidden = true;
 
 // Status refreshes every 30 seconds regardless of active tab
 setInterval(loadStatus, STATUS_REFRESH_MS);

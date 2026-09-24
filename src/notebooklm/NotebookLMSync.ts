@@ -68,7 +68,7 @@ export class NotebookLMSync {
   syncToday(vaultPath: string): SyncResult {
     const today = new Date();
     const dateStr = formatDate(today);
-    const dailyNotePath = path.join(vaultPath, 'Daily', `${dateStr}.md`);
+    const dailyNotePath = path.join(vaultPath, 'raw/daily', `${dateStr}.md`);
 
     if (!fs.existsSync(dailyNotePath)) {
       return { success: false, sourcesAdded: 0, error: `Daily note not found: ${dailyNotePath}` };
@@ -87,7 +87,7 @@ export class NotebookLMSync {
     for (let i = 6; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
       const dateStr = formatDate(d);
-      const filePath = path.join(vaultPath, 'Daily', `${dateStr}.md`);
+      const filePath = path.join(vaultPath, 'raw/daily', `${dateStr}.md`);
       if (fs.existsSync(filePath)) {
         files.push(filePath);
       }

@@ -131,7 +131,7 @@ program
         const tokenCount = getDailyTokenCount();
         const lastPoll = getDaemonState('last_poll_time');
 
-        console.log(`Daily tokens: ${tokenCount.toLocaleString()} / 50,000`);
+        console.log(`Daily tokens: ${tokenCount.toLocaleString()} / 200,000`);
         console.log(`Last poll: ${lastPoll ?? 'never'}`);
         console.log(`Dashboard: http://localhost:${DAEMON_PORT}`);
       } catch {
@@ -655,9 +655,9 @@ program
     const totalIn = usage.haiku_tokens_in;
     const totalOut = usage.haiku_tokens_out;
     const total = totalIn + totalOut;
-    // Plan §15: hard cap is $1.50/day. Haiku 4.5 list is ~$1/M in, ~$5/M out.
-    // 50k tokens is the local guardrail in ActivityAnalyzer.
-    const localBudget = 50_000;
+    // 200k tokens/day for 7 AM - midnight coverage (~17 hours).
+    // Haiku 4.5 pricing: ~$1/M in, ~$5/M out ≈ $1-1.50/day.
+    const localBudget = 200_000;
     const pct = Math.round((total / localBudget) * 100);
     console.log(`Day: ${usage.day}`);
     console.log(`Haiku tokens: ${total.toLocaleString()} / ${localBudget.toLocaleString()} (${pct}%)`);

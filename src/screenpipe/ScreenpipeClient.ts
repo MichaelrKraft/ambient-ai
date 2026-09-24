@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { SCREENPIPE_BASE_URL } from '../config/paths.js';
 import { createLogger } from '../shared/logger.js';
 import { withRetry } from '../shared/retry.js';
@@ -131,17 +132,35 @@ function makeAbortController(ms: number): AbortController {
   return controller;
 }
 
+// Screenpipe ≥0.4 requires `Authorization: Bearer <token>` on data endpoints
+// (health stays open). The token is stable per install; env var wins so it can
+// be overridden without shelling out.
+function resolveApiToken(): string {
+  if (process.env['SCREENPIPE_API_KEY']) return process.env['SCREENPIPE_API_KEY'];
+  try {
+    return execFileSync('/opt/homebrew/bin/screenpipe', ['auth', 'token'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
 // ── Client ────────────────────────────────────────────────────────────────────
 
 export class ScreenpipeClient {
   private readonly baseUrl: string;
   private readonly log: ReturnType<typeof createLogger>;
   private readonly ignoreApps: Set<string>;
+  private readonly authHeaders: Record<string, string>;
 
   constructor(baseUrl?: string, ignoreApps: string[] = []) {
     this.baseUrl = baseUrl ?? SCREENPIPE_BASE_URL;
     this.log = createLogger('screenpipe');
     this.ignoreApps = new Set([...DEFAULT_IGNORE_APPS, ...ignoreApps]);
+    const token = resolveApiToken();
+    this.authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -153,6 +172,7 @@ export class ScreenpipeClient {
     const controller = makeAbortController(HEALTH_TIMEOUT_MS);
     try {
       const response = await fetch(`${this.baseUrl}/health`, {
+        headers: this.authHeaders,
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -307,7 +327,10 @@ export class ScreenpipeClient {
    */
   private async fetchJson<T>(url: string, timeoutMs: number): Promise<T> {
     const controller = makeAbortController(timeoutMs);
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      headers: this.authHeaders,
+      signal: controller.signal,
+    });
     if (!response.ok) {
       throw new HttpError(response.status, `GET ${url} → ${response.status}`);
     }
@@ -325,7 +348,7 @@ export class ScreenpipeClient {
     const controller = makeAbortController(timeoutMs);
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders },
       body: JSON.stringify(body),
       signal: controller.signal,
     });

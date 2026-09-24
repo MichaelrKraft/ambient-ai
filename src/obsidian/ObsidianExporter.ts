@@ -36,6 +36,26 @@ interface DailyTaskData {
 
 const log = createLogger('obsidian');
 
+/**
+ * Google Drive's file-provider sync briefly locks vault files mid-sync,
+ * surfacing as EDEADLK on writeFileSync. Retry with backoff instead of
+ * failing the whole export cycle.
+ */
+function writeFileWithRetry(filePath: string, content: string, attempts = 4): void {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      fs.writeFileSync(filePath, content, 'utf8');
+      return;
+    } catch (err) {
+      const isDeadlock = (err as NodeJS.ErrnoException)?.code === 'EDEADLK';
+      if (!isDeadlock || i === attempts - 1) throw err;
+      const delayMs = 500 * 2 ** i;
+      log.warn(`Write locked by sync provider, retrying in ${delayMs}ms (attempt ${i + 1}/${attempts})`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -47,13 +67,13 @@ export interface ObsidianConfig {
 }
 
 const DEFAULT_CONFIG: ObsidianConfig = {
-  vaultPath: path.join(os.homedir(), 'Desktop/Businesses/Obsidian Notes'),
-  dailyNotesFolder: 'Daily',
+  vaultPath: path.join(os.homedir(), 'Documents/Obsidian Notes'),
+  dailyNotesFolder: 'raw/daily',
   dateFormat: 'YYYY-MM-DD',
 };
 
 function getConfig(): ObsidianConfig {
-  // Check for env override
+  // Priority: ENV var > DEFAULT_CONFIG (which now points to Documents)
   const vaultPath = process.env.OBSIDIAN_VAULT_PATH ?? DEFAULT_CONFIG.vaultPath;
   return {
     ...DEFAULT_CONFIG,
@@ -487,7 +507,7 @@ export function exportTodayToObsidian(options: ExportOptions = {}): ExportResult
     const fileName = `${formatDate(today, obsidianConfig.dateFormat)}.md`;
     const filePath = path.join(dailyDir, fileName);
 
-    fs.writeFileSync(filePath, noteContent, 'utf8');
+    writeFileWithRetry(filePath, noteContent);
     log.info(`Wrote daily note: ${filePath}`);
 
     // Log link stats

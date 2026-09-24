@@ -514,6 +514,29 @@ export function getRecentKnowledge(
   return rows.map(deserialiseKnowledge);
 }
 
+/**
+ * Returns knowledge items categorised as 'pattern' extracted within the
+ * last `hoursBack` hours, most recent first.
+ */
+export function getRecentPatterns(
+  hoursBack: number,
+  limit: number = 4,
+): KnowledgeItem[] {
+  const db = getDb();
+  const since = hoursAgoISO(hoursBack);
+
+  const rows = db
+    .prepare(
+      `SELECT * FROM knowledge_items
+       WHERE extracted_at >= ? AND category = 'pattern'
+       ORDER BY extracted_at DESC
+       LIMIT ?`,
+    )
+    .all(since, limit) as RawKnowledgeItem[];
+
+  return rows.map(deserialiseKnowledge);
+}
+
 // ---------------------------------------------------------------------------
 // Error events
 // ---------------------------------------------------------------------------
@@ -952,13 +975,68 @@ export function getRecentNotifications(hoursBack: number): Notification[] {
 // Tasks
 // ---------------------------------------------------------------------------
 
+/** Auto-captured tasks below this confidence never reach the suggestions inbox. */
+const AUTO_TASK_MIN_CONFIDENCE = 0.7;
+
+/**
+ * Word-overlap similarity in [0, 1] — intersection over the smaller set's
+ * size, so "send the deck to sarah" vs "send deck to sarah friday" scores
+ * high despite the added word. Good enough for same-day near-duplicate
+ * detection; not meant as general text similarity.
+ */
+function wordOverlap(a: string, b: string): number {
+  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(Boolean));
+  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(Boolean));
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  let shared = 0;
+  for (const w of wordsA) if (wordsB.has(w)) shared++;
+  return shared / Math.min(wordsA.size, wordsB.size);
+}
+
+/** Above this overlap, a new auto-task is considered a rephrasing of an existing one. */
+const SIMILARITY_DEDUP_THRESHOLD = 0.7;
+
+/**
+ * True if `content` closely matches an already-open auto-suggested task
+ * created today. Catches same-day rephrasings that the exact content_hash
+ * dedup misses (e.g. "Follow up with Sarah" vs "Follow up with Sarah about the deck").
+ */
+function isNearDuplicateOfTodaysSuggestions(content: string): boolean {
+  const db = getDb();
+  const today = localDateString();
+  const rows = db
+    .prepare(
+      `SELECT content FROM tasks
+       WHERE source = 'auto' AND accepted = 0 AND status = 'open'
+         AND substr(created_at, 1, 10) = ?`,
+    )
+    .all(today) as Array<{ content: string }>;
+  return rows.some((r) => wordOverlap(content, r.content) >= SIMILARITY_DEDUP_THRESHOLD);
+}
+
 /**
  * Inserts an auto-captured task, deduping on content_hash via INSERT OR IGNORE.
+ * Auto-captured tasks (source='auto') below AUTO_TASK_MIN_CONFIDENCE, or that
+ * closely rephrase a suggestion already sitting in today's inbox, are dropped
+ * before insert — these are the two main sources of inbox noise.
  *
  * Returns the new row id, or null when the task already existed (the same
- * commitment seen on a previous cycle) and the insert was ignored.
+ * commitment seen on a previous cycle), was a same-day near-duplicate, or
+ * fell below the confidence bar.
  */
 export function insertTask(task: NewTask): number | null {
+  const isAutoCapture = (task.source ?? 'auto') === 'auto';
+  if (isAutoCapture) {
+    if ((task.confidence ?? 0) < AUTO_TASK_MIN_CONFIDENCE) {
+      log.debug(`Task below confidence bar (${task.confidence}) — skipped`);
+      return null;
+    }
+    if (isNearDuplicateOfTodaysSuggestions(task.content)) {
+      log.debug('Task is a near-duplicate of an existing suggestion — skipped');
+      return null;
+    }
+  }
+
   const db = getDb();
   const hash = taskContentHash(task.content);
 
