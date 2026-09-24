@@ -32,6 +32,17 @@ export interface AmbientConfig {
   coder1BaseUrl?: string;
   /** LeadSpot.AI cloud integration. Default disabled. */
   leadspot: LeadSpotConfig;
+  /**
+   * Jev screens screen text before it leaves the Mac (src/analysis/PrivacyGate.ts).
+   * Key comes from env AMBIENT_GATE_API_KEY (Keychain via start-daemon.sh), never this file.
+   */
+  privacyGate: PrivacyGateConfig;
+}
+
+export interface PrivacyGateConfig {
+  enabled: boolean;
+  /** Any Jev score at or above this withholds the entry. */
+  threshold: number;
 }
 
 export interface NotebookLMConfig {
@@ -92,6 +103,10 @@ const DEFAULTS: Omit<AmbientConfig, 'anthropicApiKey'> = {
     daemon_id: '',
     organization_id: '',
   },
+  privacyGate: {
+    enabled: true,
+    threshold: 0.4,
+  },
 };
 
 let _config: AmbientConfig | null = null;
@@ -134,6 +149,7 @@ export function loadConfig(): AmbientConfig {
     coder1Token: process.env.CODER1_TOKEN ?? saved.coder1Token,
     coder1BaseUrl: process.env.CODER1_BASE_URL ?? saved.coder1BaseUrl,
     leadspot: mergedLeadspot,
+    privacyGate: { ...DEFAULTS.privacyGate, ...(saved.privacyGate ?? {}) },
   };
 
   return _config;

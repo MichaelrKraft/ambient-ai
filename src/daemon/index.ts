@@ -35,6 +35,7 @@ import {
 import { ScreenpipeClient } from '../screenpipe/ScreenpipeClient.js';
 import type { OcrEntry } from '../screenpipe/types.js';
 import { ActivityAnalyzer } from '../analysis/ActivityAnalyzer.js';
+import { PrivacyGate, type GateResult } from '../analysis/PrivacyGate.js';
 import { computeDailyScorecard } from '../accountability/Scorecard.js';
 import { ProactiveEngine } from '../notifications/ProactiveEngine.js';
 import { createWebServer } from '../web/server.js';
@@ -58,6 +59,7 @@ export class Daemon {
   private webServer: http.Server | null = null;
   private screenpipeClient: ScreenpipeClient | null = null;
   private analyzer: ActivityAnalyzer | null = null;
+  private privacyGate: PrivacyGate | null = null;
   private proactive: ProactiveEngine | null = null;
   private leadspot: LeadSpotIntegration | null = null;
   private readonly log = createLogger('daemon');
@@ -88,6 +90,20 @@ export class Daemon {
 
     // 5. Initialise the Claude analyzer and proactive notification engine.
     this.analyzer = new ActivityAnalyzer(config.anthropicApiKey);
+    if (config.privacyGate.enabled) {
+      this.privacyGate = new PrivacyGate({
+        apiKey: process.env.AMBIENT_GATE_API_KEY,
+        threshold: config.privacyGate.threshold,
+      });
+      if (!this.privacyGate.hasKey) {
+        this.log.error(
+          'Privacy gate is ON but AMBIENT_GATE_API_KEY is missing — ALL screen text will be withheld from Claude. ' +
+            'Add the key: security add-generic-password -a ambient-daemon -s openrouter-api-key -w <KEY>',
+        );
+      }
+    } else {
+      this.log.warn('Privacy gate is OFF (config.privacyGate.enabled = false) — raw screen text goes to Claude.');
+    }
     this.proactive = new ProactiveEngine();
 
     // 6. Start the web dashboard.
@@ -193,6 +209,18 @@ export class Daemon {
 
     this.log.info(`Got ${entries.length} OCR entries — running Claude analysis`);
 
+    // Privacy gate: private screens become placeholders before anything leaves
+    // the Mac. `forClaude` keeps the timeline (app + placeholder); `forCapture`
+    // drops private screens entirely so they never reach the vault.
+    let forClaude = entries;
+    let forCapture = entries;
+    if (this.privacyGate !== null) {
+      const gated = await this.privacyGate.screen(entries);
+      forClaude = gated.entries;
+      forCapture = gated.passed;
+      this.recordGateCounts(gated);
+    }
+
     // Fetch active goals for the prompt.
     // Map Goal (description: string | null) → AnalysisBatch goals shape
     // (description?: string) by dropping null values.
@@ -203,7 +231,7 @@ export class Daemon {
     }));
 
     const batch = {
-      entries,
+      entries: forClaude,
       periodStart: since,
       periodEnd: nowISO(),
       goals,
@@ -216,11 +244,11 @@ export class Daemon {
     // blocks the Obsidian path. Only fires when leadspot.enabled === true
     // (otherwise this.leadspot is null).
     if (this.leadspot !== null) {
-      await this.leadspot.runHook(result, entries);
+      await this.leadspot.runHook(result, forClaude);
     }
 
     // Detect browser deep reads and write to vault.
-    await this.runBrowserCapture(entries);
+    await this.runBrowserCapture(forCapture);
 
     // Recompute today's accountability scorecard from the freshly-stamped
     // activity (focus score + per-goal status). Cheap, local, never fatal.
@@ -245,6 +273,42 @@ export class Daemon {
   // ---------------------------------------------------------------------------
   // Browser deep read capture
   // ---------------------------------------------------------------------------
+
+  /**
+   * Logs gate counts (never text or window titles) and keeps a per-day tally in
+   * daemon_state for the dashboard. One row per day, pruned after 30 days.
+   */
+  private recordGateCounts(gated: GateResult): void {
+    const { counts } = gated;
+    const withheld = counts.private + counts.error + counts.over_cap;
+    this.log.info(`Privacy gate: ${counts.passed} kept / ${withheld} withheld`, { ...counts });
+    if (counts.error > 0) {
+      this.log.warn(`Privacy gate withheld ${counts.error} entries because the check failed (fail-closed)`);
+    }
+
+    const prefix = 'privacy_gate_counts:';
+    const key = prefix + localDateString();
+    let prev: Partial<GateResult['counts']> = {};
+    try {
+      prev = JSON.parse(getDaemonState(key) ?? '{}') as Partial<GateResult['counts']>;
+    } catch (err) {
+      // A corrupt tally must not stop the analysis cycle; start today's count over, loudly.
+      this.log.warn('Privacy gate tally unreadable — resetting today', { error: String(err) });
+    }
+    const merged: GateResult['counts'] = {
+      passed: (prev.passed ?? 0) + counts.passed,
+      private: (prev.private ?? 0) + counts.private,
+      error: (prev.error ?? 0) + counts.error,
+      over_cap: (prev.over_cap ?? 0) + counts.over_cap,
+    };
+    setDaemonState(key, JSON.stringify(merged));
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 30);
+    getDb()
+      .prepare('DELETE FROM daemon_state WHERE key LIKE ? AND key < ?')
+      .run(`${prefix}%`, prefix + localDateString(cutoff));
+  }
 
   private async runBrowserCapture(entries: OcrEntry[]): Promise<void> {
     const db = getDb();
