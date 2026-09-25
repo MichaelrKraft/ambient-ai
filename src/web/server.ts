@@ -46,6 +46,7 @@ import {
   markTaskDone,
   insertManualTask,
   getSuggestedTasks,
+  getQualityStats,
   getTaskById,
   reopenTask,
   acceptTask,
@@ -809,6 +810,7 @@ export function createWebServer(_store: Record<string, unknown>): http.Server {
         tokenBudget: DAILY_TOKEN_BUDGET,
         operatorMode: OPERATOR_MODE,
         clientName: process.env.CLIENT_NAME ?? '',
+        quality: getQualityStats(),
       });
     } catch (err) {
       log.error('GET /api/status failed', err);

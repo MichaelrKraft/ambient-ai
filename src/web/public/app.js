@@ -112,6 +112,13 @@ async function loadStatus() {
       }
     }
 
+    const qualityEl = document.getElementById('quality');
+    if (qualityEl && data.quality) {
+      const q = data.quality;
+      const kept = q.suggestions > 0 ? `${Math.round((q.accepted / q.suggestions) * 100)}% kept` : 'no suggestions';
+      qualityEl.textContent = `${q.notificationsPerDay} alerts/day · ${kept} (7d)`;
+    }
+
     const dot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
     if (dot && statusText) {

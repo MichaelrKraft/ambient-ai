@@ -179,3 +179,37 @@ Goal: stop paying Haiku to re-summarize the same doc/video every 7 minutes.
 - [ ] On skip, extend the latest activity session's `period_end` so time tracking loses nothing; still run scorecard + proactive; skip privacy gate, Haiku, LeadSpot hook, browser capture (screen unchanged).
 - [ ] Log skip counts only (no text), keep a per-day `haiku_skips:<date>` tally to measure the saving.
 - [ ] Tests for detector + session extend; tsc + vitest; build; restart daemon (ask first).
+
+---
+
+## Plan: cut notification + task noise (2026-09-24)
+
+**Why (from ambient.db):** 285 notifications in 7 days (~41/day), 284 of them "Stuck error" alerts; 0 of 1,838 notifications ever got feedback. 475 auto-tasks ever: 4 done, 21 accepted, 323 dismissed unseen, 127 open unseen. 395 of 475 came from batches with Terminal on screen — mostly instructions to/from Claude Code ("Tune the privacy gate", "tell the assistant 'done'"). Stuck-error dedup fails because Haiku rewords each error (283 events, 251 distinct 50-char prefixes). One auto-task holds a truncated API key.
+
+**Targets for a 2-week dogfood:** ≤2 notifications/day; >50% of suggestions accepted; nothing secret in a task.
+
+### Phase 1 — Notifications
+- [x] Config `notifications.stuckErrors` (default false): ProactiveEngine skips `checkStuckErrors` unless on. Errors still recorded and visible in the dashboard.
+- [x] Global cap: max 2 notifications per local day across all checks (count today's rows before firing).
+- [x] Tests: stuck-errors off by default; cap holds at 2.
+
+### Phase 2 — Suggested tasks
+- [x] Analyzer prompt: requests between the user and an AI assistant (Claude Code, ChatGPT, Claude app) and steps in a coding session are NOT tasks — the assistant is already handling them. Keep commitments to or from other people (email, messages, meetings, documents).
+- [x] Drop any auto-task whose text looks like a secret (`sk-`, `key`, token-like strings) and run `filterPII` on task content before insert.
+- [x] Suggestions older than 7 days with no action auto-expire (status `dismissed`, accepted 0). Inbox shows at most 3, highest confidence first.
+- [x] One-time: expire the 127 stale suggestions; delete the row holding the key fragment.
+- [x] Tests for the filter, expiry, and 3-item cap.
+
+### Phase 3 — Measure
+- [x] `/api/status` + dashboard strip: notifications/day (7d) and suggestion acceptance rate (7d).
+- [x] tsc + vitest; build.
+- [ ] Restart daemon (ask first).
+
+**Not in this plan:** trust panel, weekly receipt, collapsing surfaces into the morning brief. Jev notification gate dropped — after Phase 1 volume is ~1–2/day, so it fails the "repeated" test.
+
+### Review
+- Notifications: new `notifications` config (`stuckErrors: false`, `maxPerDay: 2`); ProactiveEngine checks the day's count first (fails closed) and runs stuck-error alerts only when on.
+- Tasks: analyzer prompt excludes AI-assistant conversations; `src/analysis/taskFilters.ts` drops auto-tasks that look like secrets, and task text goes through `filterPII`; inbox shows 3, highest confidence first; untouched suggestions expire after 7 days each cycle (dismissed, not deleted).
+- Measure: `/api/status.quality` + operator status bar "N alerts/day · X% kept (7d)".
+- Data: 119 open suggestions dismissed (ids in `~/.ambient/suggestions-cleared-2026-09-24.json` for undo); 1 task holding a key fragment deleted. Other "sk-" hits in knowledge/sessions were words like "task-automation", not keys.
+- Tests: `tests/noiseCut.test.ts` (10); full suite 248 passing; build clean.

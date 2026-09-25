@@ -37,6 +37,18 @@ export interface AmbientConfig {
    * Key comes from env AMBIENT_GATE_API_KEY (Keychain via start-daemon.sh), never this file.
    */
   privacyGate: PrivacyGateConfig;
+  notifications: NotificationsConfig;
+}
+
+export interface NotificationsConfig {
+  /**
+   * "Stuck for 1.5h" alerts about errors read off the screen. Off by default:
+   * they were 284 of 285 notifications in a week and nobody acted on one.
+   * Errors are still recorded and shown in the dashboard.
+   */
+  stuckErrors: boolean;
+  /** Hard cap on notifications per local day, across every check. */
+  maxPerDay: number;
 }
 
 export interface PrivacyGateConfig {
@@ -107,6 +119,10 @@ const DEFAULTS: Omit<AmbientConfig, 'anthropicApiKey'> = {
     enabled: true,
     threshold: 0.4,
   },
+  notifications: {
+    stuckErrors: false,
+    maxPerDay: 2,
+  },
 };
 
 let _config: AmbientConfig | null = null;
@@ -150,6 +166,7 @@ export function loadConfig(): AmbientConfig {
     coder1BaseUrl: process.env.CODER1_BASE_URL ?? saved.coder1BaseUrl,
     leadspot: mergedLeadspot,
     privacyGate: { ...DEFAULTS.privacyGate, ...(saved.privacyGate ?? {}) },
+    notifications: { ...DEFAULTS.notifications, ...(saved.notifications ?? {}) },
   };
 
   return _config;

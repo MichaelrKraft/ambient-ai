@@ -13,6 +13,8 @@ import crypto from 'crypto';
 import { getDb } from './db.js';
 import { createLogger } from '../shared/logger.js';
 import { nowISO, hoursAgoISO, minutesAgoISO } from '../shared/time.js';
+import { filterPII } from '../analysis/PIIFilter.js';
+import { looksLikeSecret } from '../analysis/taskFilters.js';
 
 const log = createLogger('store');
 
@@ -968,6 +970,46 @@ export function insertNotification(notif: NewNotification): void {
   log.debug('Inserted notification');
 }
 
+export interface QualityStats {
+  /** Average notifications per day over the window. */
+  notificationsPerDay: number;
+  /** Auto-suggested tasks created in the window, and how many the user accepted. */
+  suggestions: number;
+  accepted: number;
+}
+
+/**
+ * The two numbers the dogfood targets are judged on: notification volume, and
+ * the share of suggested tasks worth keeping. Target: <=2/day and >50%.
+ */
+export function getQualityStats(days: number = 7): QualityStats {
+  const db = getDb();
+  const since = hoursAgoISO(days * 24);
+  const notes = db
+    .prepare(`SELECT COUNT(*) AS n FROM notifications WHERE triggered_at >= ?`)
+    .get(since) as { n: number };
+  const tasks = db
+    .prepare(
+      `SELECT COUNT(*) AS total, COALESCE(SUM(accepted = 1), 0) AS accepted
+       FROM tasks WHERE source = 'auto' AND created_at >= ?`,
+    )
+    .get(since) as { total: number; accepted: number };
+  return {
+    notificationsPerDay: Math.round((notes.n / days) * 10) / 10,
+    suggestions: tasks.total,
+    accepted: tasks.accepted,
+  };
+}
+
+/** Notifications sent since local midnight today. */
+export function countNotificationsToday(now: Date = new Date()): number {
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+  const row = getDb()
+    .prepare(`SELECT COUNT(*) AS n FROM notifications WHERE triggered_at >= ?`)
+    .get(midnight) as { n: number };
+  return row.n;
+}
+
 /**
  * Returns notifications sent within the last `hoursBack` hours,
  * most recent first.
@@ -1037,12 +1079,17 @@ function isNearDuplicateOfTodaysSuggestions(content: string): boolean {
  * before insert — these are the two main sources of inbox noise.
  *
  * Returns the new row id, or null when the task already existed (the same
- * commitment seen on a previous cycle), was a same-day near-duplicate, or
- * fell below the confidence bar.
+ * commitment seen on a previous cycle), was a same-day near-duplicate,
+ * fell below the confidence bar, or looked like it held a secret.
  */
 export function insertTask(task: NewTask): number | null {
   const isAutoCapture = (task.source ?? 'auto') === 'auto';
   if (isAutoCapture) {
+    if (looksLikeSecret(task.content)) {
+      log.debug('Task text looks like it holds a secret — skipped');
+      return null;
+    }
+    task = { ...task, content: filterPII(task.content) };
     if ((task.confidence ?? 0) < AUTO_TASK_MIN_CONFIDENCE) {
       log.debug(`Task below confidence bar (${task.confidence}) — skipped`);
       return null;
@@ -1118,17 +1165,40 @@ export function getOpenTasks(limit: number = 100): Task[] {
   return rows.map(deserialiseTask);
 }
 
-/** Auto-captured tasks awaiting triage in the "Ambient noticed" inbox. */
-export function getSuggestedTasks(limit: number = 50): Task[] {
+/** Days an untouched suggestion stays in the inbox before it expires. */
+export const SUGGESTION_TTL_DAYS = 7;
+/** The inbox shows only the strongest few; a long list gets ignored wholesale. */
+export const MAX_SUGGESTIONS_SHOWN = 3;
+
+/**
+ * Auto-captured tasks awaiting triage in the "Ambient noticed" inbox:
+ * highest confidence first, newest breaking ties.
+ */
+export function getSuggestedTasks(limit: number = MAX_SUGGESTIONS_SHOWN): Task[] {
   const db = getDb();
   const rows = db
     .prepare(
       `SELECT * FROM tasks
        WHERE status = 'open' AND accepted = 0 AND source = 'auto'
-       ORDER BY created_at DESC LIMIT ?`,
+       ORDER BY COALESCE(confidence, 0) DESC, created_at DESC LIMIT ?`,
     )
     .all(limit) as RawTask[];
   return rows.map(deserialiseTask);
+}
+
+/**
+ * Dismisses suggestions nobody acted on within `days`. They are marked
+ * dismissed, not deleted, so they can be restored. Returns how many expired.
+ */
+export function expireStaleSuggestions(days: number = SUGGESTION_TTL_DAYS, now: Date = new Date()): number {
+  const cutoff = new Date(now.getTime() - days * 86_400_000).toISOString();
+  const result = getDb()
+    .prepare(
+      `UPDATE tasks SET status = 'dismissed'
+       WHERE source = 'auto' AND accepted = 0 AND status = 'open' AND created_at < ?`,
+    )
+    .run(cutoff);
+  return result.changes;
 }
 
 /**

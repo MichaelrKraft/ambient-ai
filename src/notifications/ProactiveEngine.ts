@@ -10,6 +10,9 @@
  *   4. checkGoalProgress    — a goal nearing its target date with no recent
  *      progress.
  *
+ * Stuck-error alerts run only when config.notifications.stuckErrors is on, and
+ * nothing fires once config.notifications.maxPerDay is reached for the day.
+ *
  * At most ONE notification fires per checkAndNotify() call (true single-fire,
  * enforced by the `if (fired === 0)` chain) so a backlog never floods the user.
  * Each fired notification embeds a stable dedup token in its content
@@ -35,6 +38,7 @@ import {
   getActiveGoals,
   markErrorNotified,
   insertNotification,
+  countNotificationsToday,
   localDateString,
   type ErrorEvent,
   type IntentionItem,
@@ -49,10 +53,11 @@ export class ProactiveEngine {
    * Returns the number of notifications fired (0 or 1).
    */
   async checkAndNotify(config: AmbientConfig): Promise<number> {
+    if (this.dailyCapReached(config)) return 0;
     let fired = 0;
     // Priority 1 (imminent meeting) is added in Phase 4 — checkUpcomingMeetings.
     if (fired === 0) fired += await this.checkOverdueTasks(config);
-    if (fired === 0) fired += await this.checkStuckErrors(config);
+    if (fired === 0 && config.notifications.stuckErrors) fired += await this.checkStuckErrors(config);
     if (fired === 0) fired += await this.checkDrift(config);
     if (fired === 0) fired += await this.checkGoalProgress(config);
     return fired;
@@ -65,6 +70,16 @@ export class ProactiveEngine {
   /** Channel to use given current config: Telegram + system when a token is set. */
   private channelFor(config: AmbientConfig): NotificationChannel {
     return config.telegramBotToken ? 'both' : 'system';
+  }
+
+  /** True once today's notifications hit the cap. Fails closed on a query error. */
+  private dailyCapReached(config: AmbientConfig): boolean {
+    try {
+      return countNotificationsToday() >= config.notifications.maxPerDay;
+    } catch (err) {
+      this.log.warn('Failed to count today\'s notifications', { error: String(err) });
+      return true;
+    }
   }
 
   /** True if a notification containing `token` was sent within `hoursBack`. */

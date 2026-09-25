@@ -32,6 +32,7 @@ import {
   setDaemonState,
   setIntentionsReviewed,
   localDateString,
+  expireStaleSuggestions,
 } from '../storage/AmbientStore.js';
 import { ScreenpipeClient } from '../screenpipe/ScreenpipeClient.js';
 import type { OcrEntry } from '../screenpipe/types.js';
@@ -222,6 +223,14 @@ export class Daemon {
       computeDailyScorecard();
     } catch (err) {
       this.log.warn('Scorecard computation failed (non-fatal)', err);
+    }
+
+    // Suggestions nobody acted on within a week drop out of the inbox.
+    try {
+      const expired = expireStaleSuggestions();
+      if (expired > 0) this.log.info('Expired stale task suggestions', { count: expired });
+    } catch (err) {
+      this.log.warn('Suggestion expiry failed (non-fatal)', err);
     }
 
     // Check proactive notification triggers after each analysis cycle.
