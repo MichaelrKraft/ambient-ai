@@ -213,3 +213,78 @@ Goal: stop paying Haiku to re-summarize the same doc/video every 7 minutes.
 - Measure: `/api/status.quality` + operator status bar "N alerts/day · X% kept (7d)".
 - Data: 119 open suggestions dismissed (ids in `~/.ambient/suggestions-cleared-2026-09-24.json` for undo); 1 task holding a key fragment deleted. Other "sk-" hits in knowledge/sessions were words like "task-automation", not keys.
 - Tests: `tests/noiseCut.test.ts` (10); full suite 248 passing; build clean.
+
+---
+
+# Fast Brain Phase 0 — log-only Jev judgments per screen entry (approved by Mike 2026-09-28)
+
+Inspired by shipwithjev.com patterns (live per-event classification + cascade). Goal: measure
+whether cheap per-entry Jev judgments can power an in-the-moment "deep work drift" nudge
+(Mike's chosen first nudge), BEFORE wiring any nudge. Phase 0 changes nothing user-visible.
+
+## Design (grounded in recon 2026-09-28)
+- Insertion point: `src/daemon/index.ts` right after the privacy gate pass (~:217), inside the
+  existing 7-min cycle (`pollingIntervalMinutes` default 7 — config's `analysis_interval_minutes`
+  is dead, loader reads a different key). No new scheduler cron in Phase 0: judgment quality and
+  cost first, latency later.
+- New module `src/analysis/FastBrain.ts`, cloned from the `PrivacyGate.ts` request shape:
+  POST https://openrouter.ai/api/alpha/decisions, model `~typesafe/jev-latest`, Bearer
+  `AMBIENT_GATE_API_KEY` (already loaded from Keychain by `~/.coder1/bin/ambient-start.sh`),
+  `provider:{zdr:true}`, 5s timeout, 5 concurrent, per-cycle cap.
+- Per gate-passed entry (deduped near-identical text, same as gate), state =
+  `{app, window, text≤8k, prevApp, prevWindow, activeIntention}` where activeIntention comes from
+  today's `daily_intentions` (or Tier-1 goal names). Noul battery v1:
+  - `focused_work`: "Does this screen show Mike actively doing focused work (writing, coding,
+    designing, reading work material)? Passive feeds and inbox skimming count as no."
+  - `off_intention`: "Given Mike's stated intention for today (<intention>), is what's on this
+    screen unrelated to it? (Answer unclear-low if no intention is stated.)"
+  - `distraction`: "Does this screen show social media, news, entertainment, or shopping
+    unrelated to work? (Work-related X/LinkedIn research counts as no.)"
+  - `context_switch`: "Is this a switch to a different task than the previous screen
+    (<prevApp>/<prevWindow>), not just a different window of the same task?"
+  Wording WILL need iteration — the PII-gate test showed one rewrite cut false alarms 7→4.
+- Storage: new `jev_judgments` table (migration in `src/storage/schema.ts`): ts, app, window,
+  text_hash, probs JSON, latency_ms, cost. Daily counts + spend in `daemon_state`
+  under `fast_brain_counts:<date>` (mirror of `privacy_gate_counts`).
+- Cost guard: hard daily cap (default $0.25/day) → skip silently and count skips. Any API
+  failure = skip that entry, never block the cycle (but COUNT failures; a .catch that hides
+  zeros is a bug per Mike's rules).
+- Config flag `fast_brain.enabled` (default true once merged) + `fast_brain.daily_cost_cap`.
+
+## Explicitly NOT in Phase 0
+- No nudges, no notifications, no ProactiveEngine changes.
+- No faster polling loop (Phase 1 decision, driven by the logs).
+- No changes to PrivacyGate, ActivityAnalyzer, or the Haiku path.
+
+## Phase 1 preview (only after ≥3 days of logs reviewed)
+- `checkDeepWorkDrift()` in `ProactiveEngine` (inherits maxPerDay cap = interruption budget,
+  Mike gave no number → keep existing 2/day): fire when the last ~20 min of judgments show
+  sustained off_intention/distraction during a day with an unfinished Tier-1 intention.
+  Delivery = existing node-notifier macOS notification path.
+
+## Checklist (executed 2026-09-28; fresh-eyes review fixes applied)
+- [x] 1. Migration v9: `jev_judgments` table (schema.ts).
+- [x] 2. `src/analysis/FastBrain.ts` — fail-open, errors counted never silent; parses
+       `usage.cost` from the decisions response; per-cycle cap + $ budget (budget can
+       overshoot by ≤1 concurrency batch of 5, pennies).
+- [x] 3. Wired INSIDE `analyzeEntries` on `gated.passed` (reviewer catch: original plan's
+       insertion point was pre-gate). Config is camelCase `fastBrain` with its own merge
+       line in loadConfig (reviewer catch: dotted snake_case keys would never be read).
+       `off_intention` question is skipped entirely when no intention is set (reviewer
+       catch: daily_intentions is stale; nouls have no "unclear").
+- [x] 4. tests/fastBrain.test.ts: 6 tests; full suite 254 passing (248 baseline + 6).
+- [x] 5. Build clean. Daemon restart: PENDING Mike's ok (repo rule: always ask before
+       restarting services). Command: `launchctl kickstart -k gui/501/com.coder1.ambient`,
+       then verify `coder1-ambient status`, `fast_brain_counts:` in daemon_state, and rows
+       in jev_judgments.
+- [ ] 6. After 3 days of logs: review quality/cost, decide Phase 1 wording + thresholds.
+       Known gap (reviewer): `reuseLastSummary` skips analyzeEntries on unchanged screens,
+       so one long unchanged screen (a video) logs no judgments — Phase 1 drift logic must
+       treat "no judgments + unchanged screen" as "same activity continuing".
+
+## Guardrails
+- Branch `feature/airjelly-proactive-agent` is the live branch — commit there, no new branch
+  unless the diff grows beyond this scope. Never master.
+- Full test suite must stay green (248 passing baseline).
+- Daemon runs from dist/ under launchd — a broken build means Ambient stops logging; verify
+  status after restart (`coder1-ambient status` + tail `~/.ambient/daemon.log`).

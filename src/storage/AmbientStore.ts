@@ -1367,6 +1367,27 @@ export function getDaemonState(key: string): string | null {
   return row?.value ?? null;
 }
 
+/** Inserts one cycle's FastBrain judgments (Phase 0 log-only rows). */
+export function insertJevJudgments(rows: import('../analysis/FastBrain.js').FastBrainJudgment[]): void {
+  if (rows.length === 0) return;
+  const db = getDb();
+  const stmt = db.prepare(
+    `INSERT INTO jev_judgments
+       (ts, app, window, text_hash, p_focused_work, p_off_intention, p_distraction, p_context_switch, latency_ms, cost, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insertAll = db.transaction((batch: typeof rows) => {
+    for (const r of batch) {
+      stmt.run(
+        r.ts, r.app, r.window, r.textHash,
+        r.pFocusedWork ?? null, r.pOffIntention ?? null, r.pDistraction ?? null, r.pContextSwitch ?? null,
+        r.latencyMs, r.cost, nowISO(),
+      );
+    }
+  });
+  insertAll(rows);
+}
+
 /** Upserts a key-value pair in daemon_state, updating updated_at. */
 export function setDaemonState(key: string, value: string): void {
   const db = getDb();

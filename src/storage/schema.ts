@@ -385,4 +385,27 @@ ALTER TABLE tasks ADD COLUMN accepted INTEGER NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS idx_tasks_inbox ON tasks(source, accepted, status);
 `,
   },
+  {
+    version: 9,
+    description: 'FastBrain Phase 0: log-only Jev judgments per gate-passed screen',
+    sql: `
+-- One row per (cycle, distinct screen) judged by Jev. Probability columns are
+-- NULL when that question was not asked (no previous screen / no intention set).
+CREATE TABLE IF NOT EXISTS jev_judgments (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts               TEXT NOT NULL,
+  app              TEXT NOT NULL,
+  window           TEXT,
+  text_hash        TEXT NOT NULL,
+  p_focused_work   REAL,
+  p_off_intention  REAL,
+  p_distraction    REAL,
+  p_context_switch REAL,
+  latency_ms       INTEGER,
+  cost             REAL NOT NULL DEFAULT 0,
+  created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_jev_judgments_ts ON jev_judgments(ts);
+`,
+  },
 ];

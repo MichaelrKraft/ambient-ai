@@ -38,6 +38,19 @@ export interface AmbientConfig {
    */
   privacyGate: PrivacyGateConfig;
   notifications: NotificationsConfig;
+  /**
+   * FastBrain (src/analysis/FastBrain.ts): log-only Jev judgments per
+   * gate-passed screen. Same key as the privacy gate (AMBIENT_GATE_API_KEY).
+   */
+  fastBrain: FastBrainConfig;
+}
+
+export interface FastBrainConfig {
+  enabled: boolean;
+  /** Hard $ cap per local day; judging stops silently-but-counted past it. */
+  dailyCostCapUsd: number;
+  /** Distinct screens judged per cycle at most. */
+  maxChecksPerCycle: number;
 }
 
 export interface NotificationsConfig {
@@ -123,6 +136,11 @@ const DEFAULTS: Omit<AmbientConfig, 'anthropicApiKey'> = {
     stuckErrors: false,
     maxPerDay: 2,
   },
+  fastBrain: {
+    enabled: true,
+    dailyCostCapUsd: 0.25,
+    maxChecksPerCycle: 30,
+  },
 };
 
 let _config: AmbientConfig | null = null;
@@ -167,6 +185,7 @@ export function loadConfig(): AmbientConfig {
     leadspot: mergedLeadspot,
     privacyGate: { ...DEFAULTS.privacyGate, ...(saved.privacyGate ?? {}) },
     notifications: { ...DEFAULTS.notifications, ...(saved.notifications ?? {}) },
+    fastBrain: { ...DEFAULTS.fastBrain, ...(saved.fastBrain ?? {}) },
   };
 
   return _config;

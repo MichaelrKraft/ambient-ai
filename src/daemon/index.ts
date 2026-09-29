@@ -33,11 +33,14 @@ import {
   setIntentionsReviewed,
   localDateString,
   expireStaleSuggestions,
+  getDailyIntentions,
+  insertJevJudgments,
 } from '../storage/AmbientStore.js';
 import { ScreenpipeClient } from '../screenpipe/ScreenpipeClient.js';
 import type { OcrEntry } from '../screenpipe/types.js';
 import { ActivityAnalyzer } from '../analysis/ActivityAnalyzer.js';
 import { PrivacyGate, type GateResult } from '../analysis/PrivacyGate.js';
+import { FastBrain, type FastBrainCounts } from '../analysis/FastBrain.js';
 import { ChangeDetector } from '../analysis/ChangeDetector.js';
 import { computeDailyScorecard } from '../accountability/Scorecard.js';
 import { ProactiveEngine } from '../notifications/ProactiveEngine.js';
@@ -63,6 +66,7 @@ export class Daemon {
   private screenpipeClient: ScreenpipeClient | null = null;
   private analyzer: ActivityAnalyzer | null = null;
   private privacyGate: PrivacyGate | null = null;
+  private fastBrain: FastBrain | null = null;
   private readonly changeDetector = new ChangeDetector();
   private proactive: ProactiveEngine | null = null;
   private leadspot: LeadSpotIntegration | null = null;
@@ -107,6 +111,13 @@ export class Daemon {
       }
     } else {
       this.log.warn('Privacy gate is OFF (config.privacyGate.enabled = false) — raw screen text goes to Claude.');
+    }
+    if (config.fastBrain.enabled) {
+      this.fastBrain = new FastBrain({ apiKey: process.env.AMBIENT_GATE_API_KEY });
+      if (!this.fastBrain.hasKey) {
+        this.log.warn('FastBrain is ON but AMBIENT_GATE_API_KEY is missing — no judgments will be logged.');
+        this.fastBrain = null;
+      }
     }
     this.proactive = new ProactiveEngine();
 
@@ -269,6 +280,16 @@ export class Daemon {
       this.recordGateCounts(gated);
     }
 
+    // FastBrain Phase 0: log-only Jev judgments on the gate-PASSED entries
+    // (private screens are never judged). Non-fatal by design.
+    if (this.fastBrain !== null) {
+      try {
+        await this.runFastBrain(forCapture);
+      } catch (err) {
+        this.log.warn('FastBrain judgment pass failed (non-fatal)', err);
+      }
+    }
+
     // Fetch active goals for the prompt.
     // Map Goal (description: string | null) → AnalysisBatch goals shape
     // (description?: string) by dropping null values.
@@ -334,6 +355,60 @@ export class Daemon {
    * Logs gate counts (never text or window titles) and keeps a per-day tally in
    * daemon_state for the dashboard. One row per day, pruned after 30 days.
    */
+  /**
+   * FastBrain Phase 0: judge this cycle's gate-passed screens, log the rows,
+   * and keep a daily tally (incl. spend) under fast_brain_counts:<date>.
+   */
+  private async runFastBrain(passed: OcrEntry[]): Promise<void> {
+    if (this.fastBrain === null || passed.length === 0) return;
+    const config = loadConfig();
+
+    const key = `fast_brain_counts:${localDateString()}`;
+    let prev: Partial<FastBrainCounts> = {};
+    try {
+      prev = JSON.parse(getDaemonState(key) ?? '{}') as Partial<FastBrainCounts>;
+    } catch {
+      this.log.warn('FastBrain tally unreadable — resetting today');
+    }
+    const budgetLeft = config.fastBrain.dailyCostCapUsd - (prev.cost ?? 0);
+    if (budgetLeft <= 0) {
+      this.log.info('FastBrain daily cost cap reached — skipping judgments this cycle');
+      return;
+    }
+
+    // Today's unfinished intentions drive the off_intention question; when none
+    // are set the question is simply not asked (nouls have no "unclear").
+    const intentions = getDailyIntentions(localDateString())
+      .filter((i) => i.done !== true)
+      .map((i) => i.text)
+      .filter((t): t is string => typeof t === 'string' && t.length > 0);
+    const intention = intentions.length > 0 ? intentions.join('; ') : null;
+
+    const { judgments, counts } = await this.fastBrain.judge(
+      passed,
+      intention,
+      config.fastBrain.maxChecksPerCycle,
+      budgetLeft,
+    );
+    insertJevJudgments(judgments);
+
+    const merged: FastBrainCounts = {
+      judged: (prev.judged ?? 0) + counts.judged,
+      over_cap: (prev.over_cap ?? 0) + counts.over_cap,
+      errors: (prev.errors ?? 0) + counts.errors,
+      cost: (prev.cost ?? 0) + counts.cost,
+    };
+    setDaemonState(key, JSON.stringify(merged));
+
+    this.log.info(
+      `FastBrain: ${counts.judged} screens judged (${counts.errors} errors, ${counts.over_cap} over cap), ` +
+        `$${counts.cost.toFixed(5)} this cycle, $${merged.cost.toFixed(4)} today`,
+    );
+    if (counts.errors > 0 && counts.judged === 0) {
+      this.log.warn('FastBrain: every judgment failed this cycle — check AMBIENT_GATE_API_KEY / network');
+    }
+  }
+
   private recordGateCounts(gated: GateResult): void {
     const { counts } = gated;
     const withheld = counts.private + counts.error + counts.over_cap;
