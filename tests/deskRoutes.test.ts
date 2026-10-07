@@ -228,6 +228,22 @@ describe('parseToday', () => {
     expect(parseToday({ days: {}, meta: { a: { scheduled: 'soon' } } })).toBe('meta.scheduled must be a YYYY-MM-DD date');
   });
 
+  it('accepts and round-trips meta.area business and personal', () => {
+    const body = { days: {}, meta: { a: { area: 'business' }, b: { area: 'personal', progress: true } }, lastMorning: null, notesMigrated: false };
+    expect(parseToday(body)).toEqual(body);
+  });
+
+  it('rejects any other meta.area value', () => {
+    expect(parseToday({ days: {}, meta: { a: { area: 'work' } } })).toBe('meta.area must be business or personal');
+    expect(parseToday({ days: {}, meta: { a: { area: 5 } } })).toBe('meta.area must be business or personal');
+  });
+
+  it('accepts a meta entry without area and still drops unknown meta fields', () => {
+    const out = parseToday({ days: {}, meta: { a: { moves: 1, evil: 1 }, b: { area: 'business', evil: 2 } } }) as { meta: Record<string, object> };
+    expect(out.meta.a).toEqual({ moves: 1 });
+    expect(out.meta.b).toEqual({ area: 'business' });
+  });
+
   it('rejects a bad lastMorning', () => {
     expect(parseToday({ days: {}, lastMorning: 'today' })).toBe('lastMorning must be a YYYY-MM-DD date or null');
   });

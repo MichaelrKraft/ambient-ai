@@ -70,7 +70,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 interface TodayLogEntry { id: string; kind: 'note' | 'event'; text: string; at: string }
 interface TodayDay { top: string[]; log: TodayLogEntry[]; struck: { id: string; text: string }[] }
-interface TodayMeta { progress?: true; moves?: number; scheduled?: string }
+interface TodayMeta { progress?: true; moves?: number; scheduled?: string; area?: 'business' | 'personal' }
 export interface TodayState {
   days: Record<string, TodayDay>;
   meta: Record<string, TodayMeta>;
@@ -255,6 +255,10 @@ export function parseToday(body: unknown): TodayState | string {
       if (m.scheduled !== undefined) {
         if (typeof m.scheduled !== 'string' || !DATE_RE.test(m.scheduled)) return 'meta.scheduled must be a YYYY-MM-DD date';
         out.scheduled = m.scheduled;
+      }
+      if (m.area !== undefined) {
+        if (m.area !== 'business' && m.area !== 'personal') return 'meta.area must be business or personal';
+        out.area = m.area;
       }
       meta[id] = out;
     }
