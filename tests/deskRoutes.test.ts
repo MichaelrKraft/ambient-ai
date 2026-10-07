@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseGoals, parseNotes } from '../src/web/deskRoutes.js';
+import { parseGoals, parseNotes, parseToday } from '../src/web/deskRoutes.js';
 
 describe('parseNotes', () => {
   it('accepts a well-formed list', () => {
@@ -143,5 +143,98 @@ describe('parseGoals', () => {
     expect(rows[0].name).toBe('win 0');        // newest kept
     expect(rows[299].name).toBe('win 299');
     expect(rows.some((r) => r.name === 'win 319')).toBe(false); // oldest dropped
+  });
+});
+
+describe('parseToday', () => {
+  const good = {
+    days: {
+      '2026-10-07': {
+        top: ['t1', 't2'],
+        log: [{ id: 'l1', kind: 'note', text: 'Dave asked about 55 agents', at: '2026-10-07T15:00:00.000Z' }],
+        struck: [{ id: 't9', text: 'Old thing' }],
+      },
+    },
+    meta: { t1: { progress: true, moves: 2, scheduled: '2026-10-09' } },
+    lastMorning: '2026-10-07',
+    notesMigrated: true,
+  };
+
+  it('accepts a well-formed state and round-trips it', () => {
+    expect(parseToday(good)).toEqual(good);
+  });
+
+  it('accepts an empty state', () => {
+    expect(parseToday({ days: {}, meta: {}, lastMorning: null })).toEqual({ days: {}, meta: {}, lastMorning: null, notesMigrated: false });
+  });
+
+  it('defaults a missing meta and lastMorning', () => {
+    expect(parseToday({ days: {} })).toEqual({ days: {}, meta: {}, lastMorning: null, notesMigrated: false });
+  });
+
+  it('drops unknown fields', () => {
+    const out = parseToday({ days: { '2026-10-07': { top: [], log: [], struck: [], evil: 1 } }, meta: { a: { progress: true, evil: 1 } }, extra: 1 }) as {
+      days: Record<string, object>; meta: Record<string, object>;
+    };
+    expect(Object.keys(out.days['2026-10-07']).sort()).toEqual(['log', 'struck', 'top']);
+    expect(Object.keys(out.meta.a)).toEqual(['progress']);
+    expect('extra' in out).toBe(false);
+  });
+
+  it.each([
+    ['not an object', 'body must be a JSON object'],
+    [{}, 'days is required and must be an object'],
+    [{ days: [] }, 'days is required and must be an object'],
+  ])('rejects %s', (body, msg) => {
+    expect(parseToday(body)).toBe(msg);
+  });
+
+  it('rejects a day key that is not a date', () => {
+    expect(parseToday({ days: { 'yesterday': { top: [], log: [], struck: [] } } })).toMatch(/not a YYYY-MM-DD date/);
+  });
+
+  it('accepts 100 days and rejects 101 (the client trims to 89; the server only needs a ceiling)', () => {
+    const make = (n: number) => {
+      const days: Record<string, object> = {};
+      for (let i = 0; i < n; i++) days[new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10)] = { top: [], log: [], struck: [] };
+      return days;
+    };
+    expect(typeof parseToday({ days: make(100) })).toBe('object');
+    expect(parseToday({ days: make(101) })).toBe('days is limited to 100 days');
+  });
+
+  it('rejects a non-boolean notesMigrated', () => {
+    expect(parseToday({ days: {}, notesMigrated: 'yes' })).toBe('notesMigrated must be true or false');
+  });
+
+  it('rejects a fourth top item', () => {
+    expect(parseToday({ days: { '2026-10-07': { top: ['a', 'b', 'c', 'd'], log: [], struck: [] } } }))
+      .toBe('day 2026-10-07: top is limited to 3 items');
+  });
+
+  it('rejects a 31st log entry', () => {
+    const log = Array.from({ length: 31 }, (_, i) => ({ id: `l${i}`, kind: 'note', text: 'x', at: '2026-10-07T00:00:00Z' }));
+    expect(parseToday({ days: { '2026-10-07': { top: [], log, struck: [] } } })).toBe('day 2026-10-07: log is limited to 30 entries');
+  });
+
+  it('rejects a log entry with a bad kind or over-long text', () => {
+    const bad = (l: object) => parseToday({ days: { '2026-10-07': { top: [], log: [l], struck: [] } } });
+    expect(bad({ id: 'l', kind: 'mood', text: 'x', at: 'a' })).toBe('log entry kind must be note or event');
+    expect(bad({ id: 'l', kind: 'note', text: 'x'.repeat(501), at: 'a' })).toBe('log entry text is required and limited to 500 characters');
+  });
+
+  it('rejects bad meta values', () => {
+    expect(parseToday({ days: {}, meta: { a: { moves: -1 } } })).toBe('meta.moves must be a whole number from 0 to 99');
+    expect(parseToday({ days: {}, meta: { a: { scheduled: 'soon' } } })).toBe('meta.scheduled must be a YYYY-MM-DD date');
+  });
+
+  it('rejects a bad lastMorning', () => {
+    expect(parseToday({ days: {}, lastMorning: 'today' })).toBe('lastMorning must be a YYYY-MM-DD date or null');
+  });
+
+  it('keeps __proto__ as plain data instead of polluting anything', () => {
+    const out = parseToday(JSON.parse('{"days":{},"meta":{"__proto__":{"progress":true}}}')) as { meta: Record<string, unknown> };
+    expect(({} as Record<string, unknown>).progress).toBeUndefined();
+    expect(Object.keys(out.meta)).toEqual(['__proto__']);
   });
 });
