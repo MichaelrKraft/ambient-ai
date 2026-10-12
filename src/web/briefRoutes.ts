@@ -125,6 +125,37 @@ function parseTasks(raw: unknown): MatrixTask[] | string {
 
 const sameTask = (a: MatrixTask, b: MatrixTask): boolean => JSON.stringify(a) === JSON.stringify(b);
 
+/** True when this page changed the relative order of tasks it already had. */
+function reordered(base: MatrixTask[], local: MatrixTask[]): boolean {
+  const inLocal = new Set(local.map((x) => x.id));
+  const inBase = new Set(base.map((x) => x.id));
+  const before = base.filter((x) => inLocal.has(x.id)).map((x) => x.id);
+  const after = local.filter((x) => inBase.has(x.id)).map((x) => x.id);
+  return before.some((id, i) => id !== after[i]);
+}
+
+/**
+ * Lay `tasks` out in this page's order. A task the page never saw (added on
+ * another screen) goes right before the next task that was after it on the
+ * server, or at the end when nothing placed follows it.
+ */
+function applyLocalOrder(tasks: MatrixTask[], local: MatrixTask[]): MatrixTask[] {
+  const byId = new Map(tasks.map((x) => [x.id, x]));
+  const out = local.filter((x) => byId.has(x.id)).map((x) => byId.get(x.id) as MatrixTask);
+  const placed = new Set(out.map((x) => x.id));
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    if (placed.has(tasks[i].id)) continue;
+    let at = out.length;
+    for (let j = i + 1; j < tasks.length; j++) {
+      const k = out.findIndex((o) => o.id === tasks[j].id);
+      if (k >= 0) { at = k; break; }
+    }
+    out.splice(at, 0, tasks[i]);
+    placed.add(tasks[i].id);
+  }
+  return out;
+}
+
 /**
  * Three-way merge by task id: start from what the server has now, then apply
  * only what THIS page changed relative to the copy it started from. A task the
@@ -155,7 +186,8 @@ export function mergeMatrix(
 
   const added = dismissed.local.filter((d) => !dismissed.base.includes(d));
   const merged = [...new Set([...dismissed.current, ...added])].slice(-MAX_DISMISSED);
-  return { tasks: tasks.slice(0, MAX_TASKS), dismissed: merged };
+  const ordered = reordered(base, local) ? applyLocalOrder(tasks, local) : tasks;
+  return { tasks: ordered.slice(0, MAX_TASKS), dismissed: merged };
 }
 
 function readState(): MatrixState | null {

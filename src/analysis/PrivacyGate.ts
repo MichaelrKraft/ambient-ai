@@ -69,6 +69,8 @@ export type WithheldReason = 'private' | 'error' | 'over_cap';
 export interface GateVerdict {
   withheld: boolean;
   reason?: WithheldReason;
+  /** Why a check failed (reason 'error'): http_<status>, network, timeout, bad_response, no_key. */
+  cause?: string;
   maxScore?: number;
 }
 
@@ -78,6 +80,8 @@ export interface GateResult {
   /** Only entries that passed — safe for paths that should skip private screens entirely. */
   passed: OcrEntry[];
   counts: { passed: number; private: number; error: number; over_cap: number };
+  /** Failed checks grouped by cause, so an outage can be told apart from a network blip. */
+  errorCauses: Record<string, number>;
 }
 
 export interface PrivacyGateOptions {
@@ -140,12 +144,17 @@ export class PrivacyGate {
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, toCheck.length) }, worker));
 
     const counts = { passed: 0, private: 0, error: 0, over_cap: 0 };
+    const errorCauses: Record<string, number> = {};
     const out: OcrEntry[] = [];
     const passed: OcrEntry[] = [];
     for (const e of scrubbed) {
       const v = verdicts.get(textKey(e)) ?? { withheld: true, reason: 'error' as const };
       if (v.withheld) {
         counts[v.reason ?? 'error']++;
+        if ((v.reason ?? 'error') === 'error') {
+          const cause = v.cause ?? 'unknown';
+          errorCauses[cause] = (errorCauses[cause] ?? 0) + 1;
+        }
         out.push(placeholder(e));
       } else {
         counts.passed++;
@@ -153,12 +162,12 @@ export class PrivacyGate {
         passed.push(e);
       }
     }
-    return { entries: out, passed, counts };
+    return { entries: out, passed, counts, errorCauses };
   }
 
   /** Screens one entry. Never throws; any failure withholds. */
   async check(entry: OcrEntry): Promise<GateVerdict> {
-    if (!this.hasKey) return { withheld: true, reason: 'error' };
+    if (!this.hasKey) return { withheld: true, reason: 'error', cause: 'no_key' };
 
     try {
       const res = await this.fetchImpl(DECISIONS_URL, {
@@ -172,22 +181,25 @@ export class PrivacyGate {
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-      if (!res.ok) return { withheld: true, reason: 'error' };
+      if (!res.ok) return { withheld: true, reason: 'error', cause: `http_${res.status}` };
 
       const body = (await res.json()) as DecisionsResponse;
       const scores: number[] = [];
       for (const id of Object.keys(QUESTIONS) as QuestionId[]) {
         const noul = body.answers?.[id]?.noul;
         // A missing or malformed answer is a failure, not a "no".
-        if (typeof noul !== 'number' || Number.isNaN(noul)) return { withheld: true, reason: 'error' };
+        if (typeof noul !== 'number' || Number.isNaN(noul)) {
+          return { withheld: true, reason: 'error', cause: 'bad_response' };
+        }
         scores.push(noul);
       }
       const maxScore = Math.max(...scores);
       return maxScore >= this.threshold
         ? { withheld: true, reason: 'private', maxScore }
         : { withheld: false, maxScore };
-    } catch {
-      return { withheld: true, reason: 'error' };
+    } catch (err) {
+      const timedOut = err instanceof Error && err.name === 'TimeoutError';
+      return { withheld: true, reason: 'error', cause: timedOut ? 'timeout' : 'network' };
     }
   }
 }

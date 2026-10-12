@@ -20,6 +20,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import http from 'http';
+import { execFile } from 'child_process';
 import { PATHS, DAEMON_PORT } from '../config/paths.js';
 import { loadConfig } from '../config/index.js';
 import { createLogger } from '../shared/logger.js';
@@ -40,6 +41,7 @@ import { ScreenpipeClient } from '../screenpipe/ScreenpipeClient.js';
 import type { OcrEntry } from '../screenpipe/types.js';
 import { ActivityAnalyzer } from '../analysis/ActivityAnalyzer.js';
 import { PrivacyGate, type GateResult } from '../analysis/PrivacyGate.js';
+import { GateHealthMonitor } from '../analysis/GateHealthMonitor.js';
 import { FastBrain, type FastBrainCounts } from '../analysis/FastBrain.js';
 import { ChangeDetector } from '../analysis/ChangeDetector.js';
 import { computeDailyScorecard } from '../accountability/Scorecard.js';
@@ -66,6 +68,7 @@ export class Daemon {
   private screenpipeClient: ScreenpipeClient | null = null;
   private analyzer: ActivityAnalyzer | null = null;
   private privacyGate: PrivacyGate | null = null;
+  private readonly gateHealth = new GateHealthMonitor();
   private fastBrain: FastBrain | null = null;
   private readonly changeDetector = new ChangeDetector();
   private proactive: ProactiveEngine | null = null;
@@ -278,6 +281,14 @@ export class Daemon {
       forClaude = gated.entries;
       forCapture = gated.passed;
       this.recordGateCounts(gated);
+      this.checkGateHealth(gated);
+
+      // Every screen failed its check (outage, not a verdict): analyzing the
+      // placeholders only produces an empty "all content withheld" note.
+      if (gated.counts.passed === 0 && gated.counts.private === 0 && gated.counts.error > 0) {
+        this.log.warn('Privacy gate outage: skipping analysis this cycle (nothing was checkable)');
+        return;
+      }
     }
 
     // FastBrain Phase 0: log-only Jev judgments on the gate-PASSED entries
@@ -407,6 +418,21 @@ export class Daemon {
     if (counts.errors > 0 && counts.judged === 0) {
       this.log.warn('FastBrain: every judgment failed this cycle — check AMBIENT_GATE_API_KEY / network');
     }
+  }
+
+  /** Emails Mike when the gate has been failing, and once more when it recovers. */
+  private checkGateHealth(gated: GateResult): void {
+    const event = this.gateHealth.observe(gated.counts, gated.errorCauses);
+    if (event === null) return;
+    if (event.kind === 'recovered') {
+      this.log.info('Privacy gate recovered: screens are being checked again');
+      return;
+    }
+    this.log.error(event.message);
+    const script = path.join(os.homedir(), '.claude', 'scripts', 'alert-mike.sh');
+    execFile('/bin/bash', [script, 'ambient-privacy-gate', event.message], { timeout: 30_000 }, (err) => {
+      if (err) this.log.warn('Privacy gate alert could not be sent', { error: String(err) });
+    });
   }
 
   private recordGateCounts(gated: GateResult): void {

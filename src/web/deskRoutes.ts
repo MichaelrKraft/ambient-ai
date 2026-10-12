@@ -10,6 +10,8 @@
  *   POST /api/desk/notes  → replace the whole list
  *   GET  /api/desk/goals  → { goals: [...], achieved: [...], updatedAt }
  *   POST /api/desk/goals  → replace both lists
+ *   GET  /api/desk/today  → { days, meta, lastMorning, notesMigrated, updatedAt }
+ *   POST /api/desk/today  → replace the whole Today state (2 MB parser)
  *
  * Writes replace rather than merge: the panel is a single-user surface that
  * always holds the full list, and replace makes a lost race obvious instead of
@@ -57,8 +59,28 @@ const MAX_WHY = 600;
 const MAX_LABEL = 80;
 const MAX_ID = 40;
 
+const MAX_TODAY_DAYS = 100; // a ceiling only: the client trims to 89 days
+const MAX_TOP = 3;
+const MAX_LOG = 30;
+const MAX_STRUCK = 50;
+const MAX_TODAY_TEXT = 500;
+const MAX_META = 400;
+const MAX_MOVES = 99;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+interface TodayLogEntry { id: string; kind: 'note' | 'event'; text: string; at: string }
+interface TodayDay { top: string[]; log: TodayLogEntry[]; struck: { id: string; text: string }[] }
+interface TodayMeta { progress?: true; moves?: number; scheduled?: string; area?: 'business' | 'personal' }
+export interface TodayState {
+  days: Record<string, TodayDay>;
+  meta: Record<string, TodayMeta>;
+  lastMorning: string | null;
+  notesMigrated: boolean;
+}
+
 const NOTES_FILE = path.join(os.homedir(), '.ambient', 'desk-notes.json');
 const GOALS_FILE = path.join(os.homedir(), '.ambient', 'desk-goals.json');
+const TODAY_FILE = path.join(os.homedir(), '.ambient', 'desk-today.json');
 
 /** Write via temp + rename so a reader never sees a half-written file. */
 function writeAtomic(file: string, content: string): void {
@@ -154,6 +176,103 @@ export function parseGoals(body: unknown): { goals: Goal[]; achieved: AchievedGo
   return { goals, achieved };
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Returns the clean Today state, or a string naming the first problem. */
+export function parseToday(body: unknown): TodayState | string {
+  if (typeof body !== 'object' || body === null) return 'body must be a JSON object';
+  const raw = body as Record<string, unknown>;
+  if (!isPlainObject(raw.days)) return 'days is required and must be an object';
+  const keys = Object.keys(raw.days);
+  if (keys.length > MAX_TODAY_DAYS) return `days is limited to ${MAX_TODAY_DAYS} days`;
+
+  // Null-prototype objects: a key like "__proto__" stays plain data.
+  const days: Record<string, TodayDay> = Object.create(null);
+  for (const key of keys) {
+    if (!DATE_RE.test(key)) return `day key "${key.slice(0, 20)}" is not a YYYY-MM-DD date`;
+    const d = raw.days[key];
+    if (!isPlainObject(d)) return `day ${key} must be an object`;
+
+    const topRaw = d.top ?? [];
+    if (!Array.isArray(topRaw)) return `day ${key}: top must be an array`;
+    if (topRaw.length > MAX_TOP) return `day ${key}: top is limited to ${MAX_TOP} items`;
+    const top: string[] = [];
+    for (const id of topRaw) {
+      const s = str(id, MAX_ID);
+      if (!s) return `day ${key}: top ids must be short strings`;
+      top.push(s);
+    }
+
+    const logRaw = d.log ?? [];
+    if (!Array.isArray(logRaw)) return `day ${key}: log must be an array`;
+    if (logRaw.length > MAX_LOG) return `day ${key}: log is limited to ${MAX_LOG} entries`;
+    const log: TodayLogEntry[] = [];
+    for (const item of logRaw) {
+      if (!isPlainObject(item)) return 'each log entry must be an object';
+      if (item.kind !== 'note' && item.kind !== 'event') return 'log entry kind must be note or event';
+      const id = str(item.id, MAX_ID);
+      const text = str(item.text, MAX_TODAY_TEXT);
+      const at = str(item.at, MAX_LABEL);
+      if (!id) return 'log entry id is required';
+      if (!text) return `log entry text is required and limited to ${MAX_TODAY_TEXT} characters`;
+      if (!at) return 'log entry at must be a short timestamp string';
+      log.push({ id, kind: item.kind, text, at });
+    }
+
+    const struckRaw = d.struck ?? [];
+    if (!Array.isArray(struckRaw)) return `day ${key}: struck must be an array`;
+    if (struckRaw.length > MAX_STRUCK) return `day ${key}: struck is limited to ${MAX_STRUCK} items`;
+    const struck: { id: string; text: string }[] = [];
+    for (const item of struckRaw) {
+      if (!isPlainObject(item)) return 'each struck item must be an object';
+      const id = str(item.id, MAX_ID);
+      const text = str(item.text, MAX_TODAY_TEXT);
+      if (!id || !text) return 'struck item needs id and text';
+      struck.push({ id, text });
+    }
+    days[key] = { top, log, struck };
+  }
+
+  const meta: Record<string, TodayMeta> = Object.create(null);
+  if (raw.meta !== undefined) {
+    if (!isPlainObject(raw.meta)) return 'meta must be an object';
+    const ids = Object.keys(raw.meta);
+    if (ids.length > MAX_META) return `meta is limited to ${MAX_META} tasks`;
+    for (const id of ids) {
+      if (!str(id, MAX_ID)) return 'meta keys must be task ids';
+      const m = raw.meta[id];
+      if (!isPlainObject(m)) return 'each meta entry must be an object';
+      const out: TodayMeta = {};
+      if (m.progress === true) out.progress = true;
+      if (m.moves !== undefined) {
+        if (typeof m.moves !== 'number' || !Number.isInteger(m.moves) || m.moves < 0 || m.moves > MAX_MOVES) {
+          return `meta.moves must be a whole number from 0 to ${MAX_MOVES}`;
+        }
+        out.moves = m.moves;
+      }
+      if (m.scheduled !== undefined) {
+        if (typeof m.scheduled !== 'string' || !DATE_RE.test(m.scheduled)) return 'meta.scheduled must be a YYYY-MM-DD date';
+        out.scheduled = m.scheduled;
+      }
+      if (m.area !== undefined) {
+        if (m.area !== 'business' && m.area !== 'personal') return 'meta.area must be business or personal';
+        out.area = m.area;
+      }
+      meta[id] = out;
+    }
+  }
+
+  let lastMorning: string | null = null;
+  if (raw.lastMorning !== undefined && raw.lastMorning !== null) {
+    if (typeof raw.lastMorning !== 'string' || !DATE_RE.test(raw.lastMorning)) return 'lastMorning must be a YYYY-MM-DD date or null';
+    lastMorning = raw.lastMorning;
+  }
+  if (raw.notesMigrated !== undefined && typeof raw.notesMigrated !== 'boolean') return 'notesMigrated must be true or false';
+  return { days, meta, lastMorning, notesMigrated: raw.notesMigrated === true };
+}
+
 export function registerDeskRoutes(app: Express): void {
   const log = createLogger('desk');
   const allowedOrigins = new Set([
@@ -176,6 +295,9 @@ export function registerDeskRoutes(app: Express): void {
     }
     next();
   };
+
+  // Today keeps 90 days of logs, so it gets its own larger parser first.
+  app.use('/api/desk/today', cors, express.json({ limit: '2mb' }));
 
   // Own parser, larger than the global 16kb: 500 notes of prose.
   app.use('/api/desk', cors, express.json({ limit: '512kb' }));
@@ -222,5 +344,36 @@ export function registerDeskRoutes(app: Express): void {
       log.error('POST /api/desk/goals failed', err);
       res.status(500).json({ error: 'Could not save your goals' });
     }
+  });
+
+  app.get('/api/desk/today', (_req: Request, res: Response) => {
+    res.json(readJson(TODAY_FILE, { days: {}, meta: {}, lastMorning: null, notesMigrated: false, updatedAt: null }));
+  });
+
+  app.post('/api/desk/today', (req: Request, res: Response) => {
+    const parsed = parseToday(req.body);
+    if (typeof parsed === 'string') {
+      res.status(400).json({ error: parsed });
+      return;
+    }
+    const state = { ...parsed, updatedAt: new Date().toISOString() };
+    try {
+      fs.mkdirSync(path.dirname(TODAY_FILE), { recursive: true });
+      writeAtomic(TODAY_FILE, JSON.stringify(state));
+      log.info(`today saved: ${Object.keys(parsed.days).length} days, ${Object.keys(parsed.meta).length} tasks`); // counts only
+      res.json({ ok: true, updatedAt: state.updatedAt });
+    } catch (err) {
+      log.error('POST /api/desk/today failed', err);
+      res.status(500).json({ error: 'Could not save Today' });
+    }
+  });
+
+  // Over the 2 MB limit body-parser throws; say so in plain words instead of a bare 413.
+  app.use('/api/desk/today', (err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (typeof err === 'object' && err !== null && (err as { type?: string }).type === 'entity.too.large') {
+      res.status(400).json({ error: 'Too much saved history to store. Oldest days are trimmed on the next save.' });
+      return;
+    }
+    next(err);
   });
 }
