@@ -44,6 +44,36 @@ describe('mergeMatrix', () => {
     expect(mergeMatrix(base, local, current).tasks[0]).toMatchObject({ quad: 'done', done: true });
   });
 
+  // Regression (matrix-reorder, 2026-10-11): order is the array order, but the
+  // merge used the server's order, so a reorder saved from a stale screen reverted.
+  it('applies a reorder made on this screen when the server copy changed elsewhere', () => {
+    const base = [t('a', 'A'), t('b', 'B'), t('c', 'C')];
+    const current = [t('a', 'A'), t('b', 'B'), t('c', 'C'), t('d', 'D')];
+    const local = [t('c', 'C'), t('a', 'A'), t('b', 'B')];
+    expect(ids(mergeMatrix(base, local, current).tasks)).toEqual(['c', 'a', 'b', 'd']);
+  });
+
+  it('keeps the server order when this screen did not reorder anything', () => {
+    const base = [t('a', 'A'), t('b', 'B')];
+    const current = [t('b', 'B'), t('a', 'A')];
+    const local = [t('a', 'A'), t('b', 'B')];
+    expect(ids(mergeMatrix(base, local, current).tasks)).toEqual(['b', 'a']);
+  });
+
+  it('puts a task added elsewhere before its next neighbour when this screen reorders', () => {
+    const base = [t('a', 'A'), t('b', 'B'), t('c', 'C')];
+    const current = [t('a', 'A'), t('x', 'X'), t('b', 'B'), t('c', 'C')];
+    const local = [t('c', 'C'), t('b', 'B'), t('a', 'A')];
+    expect(ids(mergeMatrix(base, local, current).tasks)).toEqual(['c', 'x', 'b', 'a']);
+  });
+
+  it('does not bring back a task deleted elsewhere when this screen reorders', () => {
+    const base = [t('a', 'A'), t('b', 'B'), t('c', 'C')];
+    const current = [t('a', 'A'), t('c', 'C')];
+    const local = [t('c', 'C'), t('b', 'B'), t('a', 'A')];
+    expect(ids(mergeMatrix(base, local, current).tasks)).toEqual(['c', 'a']);
+  });
+
   it('unions dismissed suggestions from both screens', () => {
     const out = mergeMatrix([], [], [], { base: ['x'], local: ['x', 'y'], current: ['x', 'z'] });
     expect(out.dismissed.sort()).toEqual(['x', 'y', 'z']);
